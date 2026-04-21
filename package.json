@@ -1,0 +1,29 @@
+{
+  "name": "asmr-nav",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && tsc -p tsconfig.worker.json && vite build",
+    "preview": "vite preview",
+    "cf:dev": "npm run build && wrangler dev",
+    "cf:deploy": "npm run build && wrangler deploy",
+    "d1:create": "wrangler d1 create asmr-nav",
+    "d1:migrate:local": "wrangler d1 migrations apply asmr-nav --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply asmr-nav --remote"
+  },
+  "dependencies": {
+    "vue": "^3.5.32",
+    "vue-router": "^5.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.2",
+    "@vitejs/plugin-vue": "^6.0.6",
+    "@vue/tsconfig": "^0.9.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.9",
+    "vue-tsc": "^3.2.7",
+    "wrangler": "^4.17.0"
+  }
+}
