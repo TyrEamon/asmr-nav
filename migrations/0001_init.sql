@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS links (
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS idx_links_category_sort
 ON links(category, sort_order, title COLLATE NOCASE);

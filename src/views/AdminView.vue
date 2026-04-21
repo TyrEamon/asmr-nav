@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { ImportMode, NavLink } from '../types/nav'
 import { useNavLibrary } from '../composables/useNavLibrary'
@@ -13,16 +13,18 @@ interface FormState {
   category: string
   description: string
   icon: string
+  isCommon: boolean
   sortOrder: number
 }
 
-function createEmptyForm(): FormState {
+function createEmptyForm(category = ''): FormState {
   return {
     title: '',
     url: '',
-    category: '收藏',
+    category,
     description: '',
     icon: '',
+    isCommon: false,
     sortOrder: 100,
   }
 }
@@ -38,6 +40,8 @@ const {
   refreshLinks,
   saveLink,
   deleteLink,
+  renameCategory,
+  updateCategoryOrder,
   exportLinks,
   importLinks,
 } = useNavLibrary()
@@ -46,7 +50,15 @@ const authState = ref<AuthState>('checking')
 const password = ref('')
 const loginError = ref('')
 const isLoggingIn = ref(false)
-const form = reactive(createEmptyForm())
+const lastCategory = ref('')
+const customCategory = ref(false)
+const categoryMenuOpen = ref(false)
+const categoryControl = ref<HTMLElement | null>(null)
+const categoryInput = ref<HTMLInputElement | null>(null)
+const renamingCategory = ref('')
+const renameCategoryValue = ref('')
+const categoryRenameInput = ref<HTMLInputElement | null>(null)
+const form = reactive(createEmptyForm(lastCategory.value))
 const editingId = ref<string | null>(null)
 const searchQuery = ref('')
 const activeCategory = ref('all')
@@ -55,6 +67,7 @@ const importMode = ref<ImportMode>('merge')
 const notice = ref<{ type: 'success' | 'error'; message: string } | null>(null)
 
 let noticeTimer: ReturnType<typeof setTimeout> | null = null
+let categorySelectTimer: ReturnType<typeof setTimeout> | null = null
 
 const filteredLinks = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -70,12 +83,23 @@ const filteredLinks = computed(() => {
       return true
     }
 
-    return [link.title, link.url, link.category, link.description, link.icon]
+    return [link.title, link.url, link.category, link.description, link.icon, link.isCommon ? '常用推荐' : '']
       .join(' ')
       .toLowerCase()
       .includes(query)
   })
 })
+
+const categoryOptions = computed(() => {
+  const names = categories.value.filter((category) => category !== '常用推荐')
+  return names.length ? names : ['收藏']
+})
+
+const defaultCategory = computed(() => (
+  categoryOptions.value.includes(lastCategory.value)
+    ? lastCategory.value
+    : categoryOptions.value[0] ?? '收藏'
+))
 
 function setNotice(type: 'success' | 'error', message: string) {
   notice.value = { type, message }
@@ -90,7 +114,8 @@ function setNotice(type: 'success' | 'error', message: string) {
 }
 
 function resetForm() {
-  Object.assign(form, createEmptyForm())
+  Object.assign(form, createEmptyForm(defaultCategory.value))
+  customCategory.value = !categoryOptions.value.includes(form.category)
   editingId.value = null
 }
 
@@ -101,8 +126,130 @@ function fillForm(link: NavLink) {
   form.category = link.category
   form.description = link.description
   form.icon = link.icon
+  form.isCommon = link.isCommon
   form.sortOrder = link.sortOrder
+  customCategory.value = !categoryOptions.value.includes(link.category)
   window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function toggleCategoryMenu() {
+  categoryMenuOpen.value = !categoryMenuOpen.value
+}
+
+function selectCategory(category: string) {
+  customCategory.value = false
+  categoryMenuOpen.value = false
+  renamingCategory.value = ''
+  form.category = category
+}
+
+function queueSelectCategory(category: string) {
+  if (categorySelectTimer) {
+    clearTimeout(categorySelectTimer)
+  }
+
+  categorySelectTimer = setTimeout(() => {
+    selectCategory(category)
+    categorySelectTimer = null
+  }, 260)
+}
+
+function startNewCategory() {
+  customCategory.value = true
+  categoryMenuOpen.value = false
+  renamingCategory.value = ''
+  form.category = ''
+  void nextTick(() => categoryInput.value?.focus())
+}
+
+function cancelNewCategory(force = false) {
+  if (!force && form.category.trim()) {
+    return
+  }
+
+  customCategory.value = false
+  form.category = defaultCategory.value
+}
+
+function startCategoryRename(category: string) {
+  if (categorySelectTimer) {
+    clearTimeout(categorySelectTimer)
+    categorySelectTimer = null
+  }
+
+  renamingCategory.value = category
+  renameCategoryValue.value = category
+  categoryMenuOpen.value = true
+  void nextTick(() => categoryRenameInput.value?.select())
+}
+
+function cancelCategoryRename() {
+  renamingCategory.value = ''
+  renameCategoryValue.value = ''
+}
+
+async function submitCategoryRename() {
+  const from = renamingCategory.value.trim()
+  const to = renameCategoryValue.value.trim()
+
+  if (!from || !to) {
+    setNotice('error', '请填写分类名称。')
+    return
+  }
+
+  try {
+    const count = await renameCategory(from, to)
+
+    if (form.category === from) {
+      form.category = to
+    }
+
+    if (lastCategory.value === from) {
+      lastCategory.value = to
+    }
+
+    if (activeCategory.value === from) {
+      activeCategory.value = to
+    }
+
+    cancelCategoryRename()
+    categoryMenuOpen.value = false
+    setNotice('success', `已改名：${from} -> ${to}，更新 ${count} 条。`)
+  } catch (error) {
+    setNotice('error', error instanceof Error ? error.message : '分类改名失败。')
+  }
+}
+
+async function moveCategory(category: string, direction: -1 | 1) {
+  const nextCategories = [...categoryOptions.value]
+  const index = nextCategories.indexOf(category)
+  const targetIndex = index + direction
+
+  if (index === -1 || targetIndex < 0 || targetIndex >= nextCategories.length) {
+    return
+  }
+
+  const [current] = nextCategories.splice(index, 1)
+  nextCategories.splice(targetIndex, 0, current)
+
+  try {
+    await updateCategoryOrder(nextCategories)
+    setNotice('success', '分类排序已更新。')
+  } catch (error) {
+    setNotice('error', error instanceof Error ? error.message : '分类排序保存失败。')
+  }
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  const target = event.target
+
+  if (!(target instanceof Node) || categoryControl.value?.contains(target)) {
+    return
+  }
+
+  categoryMenuOpen.value = false
+  cancelCategoryRename()
+  cancelNewCategory()
 }
 
 async function submitLogin() {
@@ -142,10 +289,12 @@ async function submitForm() {
       category: form.category,
       description: form.description,
       icon: form.icon,
+      isCommon: form.isCommon,
       sortOrder: form.sortOrder,
     })
 
     setNotice('success', editingId.value ? `已更新：${saved.title}` : `已新增：${saved.title}`)
+    lastCategory.value = saved.category
     resetForm()
   } catch (error) {
     setNotice('error', error instanceof Error ? error.message : '保存失败。')
@@ -196,10 +345,17 @@ async function handleRefresh() {
 }
 
 onMounted(async () => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
   authState.value = await validateSession() ? 'ready' : 'guest'
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+
+  if (categorySelectTimer) {
+    clearTimeout(categorySelectTimer)
+  }
+
   if (noticeTimer) {
     clearTimeout(noticeTimer)
   }
@@ -239,146 +395,267 @@ onBeforeUnmount(() => {
     </section>
 
     <template v-else>
-      <header class="admin-header">
-        <div>
-          <p class="login-kicker">admin</p>
-          <h1>链接管理</h1>
-        </div>
-        <div class="admin-actions">
-          <span class="sync-pill" :class="{ 'is-remote': backendReachable }">
-            {{ backendReachable ? 'Worker / D1' : '本地缓存' }}
-          </span>
-          <button class="btn btn-muted" type="button" @click="handleRefresh">同步</button>
-          <button class="btn btn-muted" type="button" @click="handleLogout">退出</button>
-        </div>
-      </header>
+      <section class="admin-workspace">
+        <header class="admin-topbar">
+          <div>
+            <p class="login-kicker">admin</p>
+            <h1>ASMR 导航后台</h1>
+          </div>
+          <div class="admin-actions">
+            <span class="sync-pill" :class="{ 'is-remote': backendReachable }">
+              {{ backendReachable ? 'Worker / D1' : '本地缓存' }}
+            </span>
+            <span class="sync-pill">{{ links.length }} 条链接</span>
+            <button class="btn btn-muted" type="button" @click="handleRefresh">同步</button>
+            <button class="btn btn-muted" type="button" @click="handleLogout">退出</button>
+          </div>
+        </header>
 
-      <Transition name="notice">
-        <div v-if="notice" class="notice" :class="notice.type === 'error' ? 'notice-error' : 'notice-success'">
-          {{ notice.message }}
-        </div>
-      </Transition>
+        <Transition name="notice">
+          <div v-if="notice" class="notice" :class="notice.type === 'error' ? 'notice-error' : 'notice-success'">
+            {{ notice.message }}
+          </div>
+        </Transition>
 
-      <section class="admin-layout">
-        <aside class="admin-panel">
-          <div class="panel-title">
-            <h2>{{ editingId ? '编辑链接' : '新增链接' }}</h2>
-            <button v-if="editingId" class="btn btn-muted btn-small" type="button" @click="resetForm">
-              取消
-            </button>
+        <section class="admin-command-panel">
+          <div class="command-heading">
+            <p class="login-kicker">{{ editingId ? 'editing card' : 'new card' }}</p>
+            <h2>{{ editingId ? '编辑当前导航卡片' : '管理网站导航卡片' }}</h2>
           </div>
 
-          <form class="admin-form" @submit.prevent="submitForm">
-            <label class="field-group">
-              <span class="field-label">标题</span>
-              <input v-model.trim="form.title" class="field" type="text" placeholder="例如：猫耳FM" required>
-            </label>
-
-            <label class="field-group">
-              <span class="field-label">网址</span>
-              <input v-model.trim="form.url" class="field" type="text" placeholder="https://example.com" required>
-            </label>
-
-            <div class="form-row">
-              <label class="field-group">
-                <span class="field-label">分类</span>
-                <input
-                  v-model.trim="form.category"
-                  class="field"
-                  type="text"
-                  list="category-options"
-                  placeholder="常用推荐"
-                  required
+          <form class="quick-form" @submit.prevent="submitForm">
+            <div ref="categoryControl" class="category-control" :class="{ 'is-custom': customCategory }">
+              <span class="sr-only">分类</span>
+              <input
+                v-if="customCategory"
+                ref="categoryInput"
+                v-model.trim="form.category"
+                class="field quick-field"
+                type="text"
+                placeholder="输入新分类"
+                required
+                @keydown.escape.prevent="cancelNewCategory(true)"
+              >
+              <div v-else class="category-picker">
+                <button
+                  class="field quick-field category-select-button"
+                  type="button"
+                  aria-haspopup="listbox"
+                  :aria-expanded="categoryMenuOpen"
+                  @click="toggleCategoryMenu"
+                  @keydown.escape.prevent="categoryMenuOpen = false"
                 >
-              </label>
-
-              <label class="field-group">
-                <span class="field-label">图标字</span>
-                <input v-model.trim="form.icon" class="field" type="text" maxlength="3" placeholder="AS">
-              </label>
+                  <span>{{ form.category }}</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
+                <div v-if="categoryMenuOpen" class="category-menu" role="listbox">
+                  <div v-for="(category, index) in categoryOptions" :key="category" class="category-menu-row">
+                    <div
+                      v-if="renamingCategory === category"
+                      class="category-rename-row"
+                    >
+                      <input
+                        ref="categoryRenameInput"
+                        v-model.trim="renameCategoryValue"
+                        class="category-rename-input"
+                        type="text"
+                        @keydown.enter.stop.prevent="submitCategoryRename"
+                        @keydown.escape.stop.prevent="cancelCategoryRename"
+                      >
+                      <button
+                        class="category-rename-action"
+                        type="button"
+                        aria-label="保存分类名"
+                        @click="submitCategoryRename"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="m5 12 4 4L19 6" />
+                        </svg>
+                      </button>
+                      <button
+                        class="category-rename-action"
+                        type="button"
+                        aria-label="取消改名"
+                        @click="cancelCategoryRename"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M18 6 6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    <button
+                      v-else
+                      class="category-menu-item category-menu-name"
+                      type="button"
+                      role="option"
+                      :aria-selected="form.category === category"
+                      title="双击改名"
+                      @click="queueSelectCategory(category)"
+                      @dblclick.stop.prevent="startCategoryRename(category)"
+                    >
+                      {{ category }}
+                    </button>
+                    <div v-if="renamingCategory !== category" class="category-order-actions">
+                      <button
+                        class="category-order-button"
+                        type="button"
+                        :disabled="index === 0"
+                        aria-label="分类上移"
+                        @click.stop="moveCategory(category, -1)"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="m6 15 6-6 6 6" />
+                        </svg>
+                      </button>
+                      <button
+                        class="category-order-button"
+                        type="button"
+                        :disabled="index === categoryOptions.length - 1"
+                        aria-label="分类下移"
+                        @click.stop="moveCategory(category, 1)"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="m6 9 6 6 6-6" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    class="category-menu-item category-menu-add"
+                    type="button"
+                    aria-label="新增分类"
+                    @click="startNewCategory"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <label class="field-group">
-              <span class="field-label">描述</span>
-              <input v-model.trim="form.description" class="field" type="text" placeholder="显示在卡片第二行">
+            <label>
+              <span class="sr-only">标题</span>
+              <input v-model.trim="form.title" class="field quick-field" type="text" placeholder="卡片标题" required>
             </label>
 
-            <label class="field-group">
-              <span class="field-label">排序</span>
-              <input v-model.number="form.sortOrder" class="field" type="number" min="0" step="1">
+            <label>
+              <span class="sr-only">链接</span>
+              <input v-model.trim="form.url" class="field quick-field" type="text" placeholder="卡片链接" required>
             </label>
 
-            <button class="btn btn-primary" type="submit" :disabled="syncState === 'saving'">
-              {{ editingId ? '保存修改' : '新增链接' }}
+            <label>
+              <span class="sr-only">图标字</span>
+              <input v-model.trim="form.icon" class="field quick-field" type="text" maxlength="3" placeholder="图标字">
+            </label>
+
+            <label>
+              <span class="sr-only">描述</span>
+              <input v-model.trim="form.description" class="field quick-field" type="text" placeholder="描述（可选）">
+            </label>
+
+            <label>
+              <span class="sr-only">排序</span>
+              <input v-model.number="form.sortOrder" class="field quick-field sort-field" type="number" min="0" step="1" placeholder="排序">
+            </label>
+
+            <label class="common-toggle">
+              <input v-model="form.isCommon" type="checkbox">
+              <span>常用</span>
+            </label>
+
+            <button class="btn btn-primary quick-submit" type="submit" :disabled="syncState === 'saving'">
+              {{ editingId ? '保存修改' : '+ 添加卡片' }}
+            </button>
+            <button v-if="editingId" class="btn btn-muted quick-cancel" type="button" @click="resetForm">
+              取消
             </button>
           </form>
 
-          <datalist id="category-options">
-            <option v-for="category in categories" :key="category" :value="category" />
-          </datalist>
-        </aside>
+        </section>
 
-        <section class="admin-content">
-          <div class="admin-tools">
-            <label class="field-group">
-              <span class="field-label">搜索</span>
-              <input v-model.trim="searchQuery" class="field" type="search" placeholder="标题、分类、网址">
-            </label>
+        <section class="admin-control-row">
+          <label class="field-group filter-search">
+            <span class="field-label">搜索</span>
+            <input v-model.trim="searchQuery" class="field" type="search" placeholder="标题、分类、网址">
+          </label>
 
-            <label class="field-group">
-              <span class="field-label">分类</span>
-              <select v-model="activeCategory" class="field">
-                <option value="all">全部分类</option>
-                <option v-for="category in categories" :key="category" :value="category">
-                  {{ category }}
-                </option>
-              </select>
-            </label>
+          <label class="field-group filter-category">
+            <span class="field-label">分类</span>
+            <select v-model="activeCategory" class="field">
+              <option value="all">全部分类</option>
+              <option v-for="category in categories" :key="category" :value="category">
+                {{ category }}
+              </option>
+            </select>
+          </label>
 
-            <button class="btn btn-muted" type="button" @click="handleExport">导出</button>
-          </div>
+          <button class="btn btn-muted" type="button" @click="handleExport">导出 JSON</button>
+        </section>
 
-          <section class="import-box">
+        <details class="import-box">
+          <summary>导入 JSON</summary>
+          <div class="import-body">
             <div class="import-controls">
               <select v-model="importMode" class="field">
                 <option value="merge">合并导入</option>
                 <option value="replace">整库替换</option>
               </select>
-              <button class="btn btn-muted" type="button" @click="handleImport">导入 JSON</button>
+              <button class="btn btn-muted" type="button" @click="handleImport">执行导入</button>
             </div>
-            <textarea v-model.trim="importText" class="textarea" placeholder='粘贴 [{ "title": "...", "url": "...", "category": "收藏" }]'></textarea>
-          </section>
-
-          <div class="table-card">
-            <table class="link-table">
-              <thead>
-                <tr>
-                  <th>链接</th>
-                  <th>分类</th>
-                  <th>排序</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="link in filteredLinks" :key="link.id">
-                  <td data-label="链接">
-                    <strong>{{ link.title }}</strong>
-                    <span>{{ link.description || getHostLabel(link.url) }}</span>
-                    <a :href="link.url" target="_blank" rel="noreferrer">{{ getHostLabel(link.url) }}</a>
-                  </td>
-                  <td data-label="分类">{{ link.category }}</td>
-                  <td data-label="排序">{{ link.sortOrder }}</td>
-                  <td data-label="操作">
-                    <div class="table-actions">
-                      <button class="btn btn-muted btn-small" type="button" @click="fillForm(link)">编辑</button>
-                      <button class="btn btn-danger btn-small" type="button" @click="handleDelete(link)">删除</button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <textarea
+              v-model.trim="importText"
+              class="textarea"
+              placeholder='粘贴 [{ "title": "...", "url": "...", "category": "收藏" }]'
+            ></textarea>
           </div>
-        </section>
+        </details>
+
+        <div class="table-card">
+          <table class="link-table">
+            <thead>
+              <tr>
+                <th>标题</th>
+                <th>网址</th>
+                <th>图标</th>
+                <th>描述</th>
+                <th>分类</th>
+                <th>常用</th>
+                <th>排序</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="link in filteredLinks" :key="link.id">
+                <td data-label="标题">
+                  <strong>{{ link.title }}</strong>
+                </td>
+                <td data-label="网址">
+                  <a :href="link.url" target="_blank" rel="noreferrer">{{ getHostLabel(link.url) }}</a>
+                </td>
+                <td data-label="图标">{{ link.icon || '自动' }}</td>
+                <td data-label="描述">
+                  <span>{{ link.description || '暂无描述' }}</span>
+                </td>
+                <td data-label="分类">{{ link.category }}</td>
+                <td data-label="常用">
+                  <span class="common-state" :class="{ 'is-on': link.isCommon }">
+                    {{ link.isCommon ? '是' : '否' }}
+                  </span>
+                </td>
+                <td data-label="排序">{{ link.sortOrder }}</td>
+                <td data-label="操作">
+                  <div class="table-actions">
+                    <button class="btn btn-muted btn-small" type="button" @click="fillForm(link)">编辑</button>
+                    <button class="btn btn-danger btn-small" type="button" @click="handleDelete(link)">删除</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
     </template>
   </main>

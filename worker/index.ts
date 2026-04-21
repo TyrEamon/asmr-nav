@@ -34,6 +34,7 @@ interface LinkRow {
   category: string
   description: string
   icon: string
+  is_common: number | null
   sort_order: number
   created_at: string
   updated_at: string
@@ -45,7 +46,22 @@ interface LinkInput {
   category: string
   description: string
   icon: string
+  isCommon: boolean
   sortOrder: number
+}
+
+interface CategoryRenameInput {
+  from: string
+  to: string
+}
+
+interface CategoryOrderInput {
+  categories: string[]
+}
+
+interface CategoryRow {
+  name: string
+  sort_order: number
 }
 
 interface SessionPayload {
@@ -55,33 +71,22 @@ interface SessionPayload {
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
-const COLLECTION_CATEGORY = '收藏'
-const LEGACY_COLLECTION_CATEGORY = '推荐'
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=UTF-8',
   'access-control-allow-origin': '*',
   'access-control-allow-headers': 'Content-Type, Authorization',
   'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
 }
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS links (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  url TEXT NOT NULL,
-  category TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
-  icon TEXT NOT NULL DEFAULT '',
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-) STRICT;
-
-CREATE INDEX IF NOT EXISTS idx_links_category_sort
-ON links(category, sort_order, title COLLATE NOCASE);
-
-CREATE INDEX IF NOT EXISTS idx_links_updated
-ON links(updated_at DESC);
-`
+const SCHEMA_STATEMENTS = [
+  "CREATE TABLE IF NOT EXISTS links (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+  'CREATE TABLE IF NOT EXISTS link_common (link_id TEXT PRIMARY KEY)',
+  'CREATE TABLE IF NOT EXISTS category_meta (category TEXT PRIMARY KEY, sort_order INTEGER NOT NULL DEFAULT 100)',
+  "INSERT OR IGNORE INTO link_common (link_id) SELECT id FROM links WHERE category = '常用推荐'",
+  "UPDATE links SET category = '收藏' WHERE category = '常用推荐'",
+  "INSERT OR IGNORE INTO category_meta (category, sort_order) SELECT DISTINCT category, CASE category WHEN '收藏' THEN 10 WHEN '推荐' THEN 20 ELSE 100 END FROM links",
+  'CREATE INDEX IF NOT EXISTS idx_links_category_sort ON links(category, sort_order, title COLLATE NOCASE)',
+  'CREATE INDEX IF NOT EXISTS idx_links_updated ON links(updated_at DESC)',
+]
 
 let schemaReady: Promise<void> | null = null
 
@@ -118,7 +123,8 @@ function buildLinkPayload(raw: unknown): LinkInput | null {
   const candidate = raw as Partial<LinkInput>
   const title = candidate.title?.trim() ?? ''
   const url = normalizeUrl(candidate.url ?? '')
-  const category = normalizeCategory(candidate.category ?? '')
+  const rawCategory = candidate.category ?? ''
+  const category = normalizeCategory(rawCategory)
   const sortOrder = Number(candidate.sortOrder ?? 0)
 
   if (!title || !url || !category) {
@@ -131,8 +137,45 @@ function buildLinkPayload(raw: unknown): LinkInput | null {
     category,
     description: candidate.description?.trim() ?? '',
     icon: candidate.icon?.trim().slice(0, 3) ?? '',
+    isCommon: Boolean(candidate.isCommon) || rawCategory.trim() === '常用推荐',
     sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
   }
+}
+
+function buildCategoryRenamePayload(raw: unknown): CategoryRenameInput | null {
+  if (!raw || typeof raw !== 'object') {
+    return null
+  }
+
+  const candidate = raw as Partial<CategoryRenameInput>
+  const from = normalizeCategory(candidate.from ?? '')
+  const to = normalizeCategory(candidate.to ?? '')
+
+  if (!from || !to) {
+    return null
+  }
+
+  return { from, to }
+}
+
+function buildCategoryOrderPayload(raw: unknown): CategoryOrderInput | null {
+  if (!raw || typeof raw !== 'object') {
+    return null
+  }
+
+  const candidate = raw as { categories?: unknown }
+
+  if (!Array.isArray(candidate.categories)) {
+    return null
+  }
+
+  const categories = Array.from(new Set(
+    candidate.categories
+      .map((category) => normalizeCategory(String(category)))
+      .filter(Boolean),
+  ))
+
+  return categories.length ? { categories } : null
 }
 
 function rowToLink(row: LinkRow): NavLink {
@@ -143,6 +186,7 @@ function rowToLink(row: LinkRow): NavLink {
     category: normalizeCategory(row.category),
     description: row.description,
     icon: row.icon,
+    isCommon: Boolean(row.is_common) || row.category === '常用推荐',
     sortOrder: row.sort_order,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -151,12 +195,7 @@ function rowToLink(row: LinkRow): NavLink {
 
 function normalizeCategory(value: string) {
   const category = value.trim()
-
-  if (category === LEGACY_COLLECTION_CATEGORY) {
-    return COLLECTION_CATEGORY
-  }
-
-  return category
+  return category === '常用推荐' ? '收藏' : category
 }
 
 function createId() {
@@ -164,8 +203,11 @@ function createId() {
 }
 
 function ensureSchema(env: Env) {
-  schemaReady ??= env.ASMR_DB.exec(SCHEMA_SQL)
-    .then(() => undefined)
+  schemaReady ??= (async () => {
+    for (const statement of SCHEMA_STATEMENTS) {
+      await env.ASMR_DB.exec(statement)
+    }
+  })()
     .catch((error) => {
       schemaReady = null
       throw error
@@ -174,51 +216,99 @@ function ensureSchema(env: Env) {
   return schemaReady
 }
 
+async function ensureCategoryMeta(env: Env, category: string) {
+  const sortOrder = category === '收藏'
+    ? 10
+    : category === '推荐'
+      ? 20
+      : 100
+
+  await env.ASMR_DB
+    .prepare('INSERT OR IGNORE INTO category_meta (category, sort_order) VALUES (?, ?)')
+    .bind(category, sortOrder)
+    .run()
+}
+
 async function listLinks(env: Env) {
   const result = await env.ASMR_DB
     .prepare(`
       SELECT
-        id,
-        title,
-        url,
-        category,
-        description,
-        icon,
-        sort_order,
-        created_at,
-        updated_at
+        links.id,
+        links.title,
+        links.url,
+        links.category,
+        links.description,
+        links.icon,
+        CASE WHEN link_common.link_id IS NULL THEN 0 ELSE 1 END AS is_common,
+        links.sort_order,
+        links.created_at,
+        links.updated_at
       FROM links
+      LEFT JOIN link_common ON link_common.link_id = links.id
+      LEFT JOIN category_meta ON category_meta.category = links.category
       ORDER BY
-        CASE category
-          WHEN '常用推荐' THEN 0
-          WHEN '收藏' THEN 1
-          WHEN '推荐' THEN 1
-          ELSE 10
-        END,
-        category COLLATE NOCASE ASC,
-        sort_order ASC,
-        title COLLATE NOCASE ASC
+        COALESCE(category_meta.sort_order, CASE links.category WHEN '收藏' THEN 10 WHEN '推荐' THEN 20 ELSE 100 END),
+        links.category COLLATE NOCASE ASC,
+        links.sort_order ASC,
+        links.title COLLATE NOCASE ASC
     `)
     .all<LinkRow>()
 
   return result.results.map(rowToLink)
 }
 
+async function listCategories(env: Env) {
+  await env.ASMR_DB
+    .prepare(`
+      INSERT OR IGNORE INTO category_meta (category, sort_order)
+      SELECT DISTINCT
+        category,
+        CASE category
+          WHEN '收藏' THEN 10
+          WHEN '推荐' THEN 20
+          ELSE 100
+        END
+      FROM links
+    `)
+    .run()
+
+  const result = await env.ASMR_DB
+    .prepare(`
+      SELECT
+        links.category AS name,
+        COALESCE(category_meta.sort_order, CASE links.category WHEN '收藏' THEN 10 WHEN '推荐' THEN 20 ELSE 100 END) AS sort_order
+      FROM links
+      LEFT JOIN category_meta ON category_meta.category = links.category
+      GROUP BY links.category
+      ORDER BY
+        sort_order ASC,
+        links.category COLLATE NOCASE ASC
+    `)
+    .all<CategoryRow>()
+
+  return result.results.map((row) => ({
+    name: normalizeCategory(row.name),
+    sortOrder: Number(row.sort_order),
+  }))
+}
+
 async function readLink(env: Env, id: string) {
   const row = await env.ASMR_DB
     .prepare(`
       SELECT
-        id,
-        title,
-        url,
-        category,
-        description,
-        icon,
-        sort_order,
-        created_at,
-        updated_at
+        links.id,
+        links.title,
+        links.url,
+        links.category,
+        links.description,
+        links.icon,
+        CASE WHEN link_common.link_id IS NULL THEN 0 ELSE 1 END AS is_common,
+        links.sort_order,
+        links.created_at,
+        links.updated_at
       FROM links
-      WHERE id = ?
+      LEFT JOIN link_common ON link_common.link_id = links.id
+      WHERE links.id = ?
       LIMIT 1
     `)
     .bind(id)
@@ -269,6 +359,20 @@ async function writeLink(env: Env, input: LinkInput, id?: string) {
     )
     .run()
 
+  await ensureCategoryMeta(env, input.category)
+
+  if (input.isCommon) {
+    await env.ASMR_DB
+      .prepare('INSERT OR IGNORE INTO link_common (link_id) VALUES (?)')
+      .bind(linkId)
+      .run()
+  } else {
+    await env.ASMR_DB
+      .prepare('DELETE FROM link_common WHERE link_id = ?')
+      .bind(linkId)
+      .run()
+  }
+
   return readLink(env, linkId)
 }
 
@@ -314,6 +418,28 @@ async function ensureSeedData(env: Env) {
 
   if (statements.length) {
     await env.ASMR_DB.batch(statements)
+  }
+
+  const categoryStatements = Array.from(new Set(defaultLinks.map((link) => link.category))).map((category, index) =>
+    env.ASMR_DB
+      .prepare('INSERT OR IGNORE INTO category_meta (category, sort_order) VALUES (?, ?)')
+      .bind(category, (index + 1) * 10),
+  )
+
+  if (categoryStatements.length) {
+    await env.ASMR_DB.batch(categoryStatements)
+  }
+
+  const commonStatements = defaultLinks
+    .filter((link) => link.isCommon)
+    .map((link) =>
+      env.ASMR_DB
+        .prepare('INSERT OR IGNORE INTO link_common (link_id) VALUES (?)')
+        .bind(link.id),
+    )
+
+  if (commonStatements.length) {
+    await env.ASMR_DB.batch(commonStatements)
   }
 }
 
@@ -495,6 +621,7 @@ async function handleApi(request: Request, env: Env) {
   if (url.pathname === '/api/links' && request.method === 'GET') {
     return json({
       items: await listLinks(env),
+      categories: await listCategories(env),
       source: 'd1',
     })
   }
@@ -515,6 +642,87 @@ async function handleApi(request: Request, env: Env) {
     return json({ item: await writeLink(env, payload) }, 201)
   }
 
+  if (url.pathname === '/api/categories/rename' && request.method === 'POST') {
+    const authError = await requireAdmin(request, env)
+
+    if (authError) {
+      return authError
+    }
+
+    const payload = buildCategoryRenamePayload(await request.json().catch(() => null))
+
+    if (!payload) {
+      return json({ error: 'Invalid category rename payload.' }, 400)
+    }
+
+    if (payload.from === payload.to) {
+      return json({ updated: 0, from: payload.from, to: payload.to })
+    }
+
+    const countRow = await env.ASMR_DB
+      .prepare('SELECT COUNT(*) AS count FROM links WHERE category = ?')
+      .bind(payload.from)
+      .first<{ count: number | string }>()
+    const updated = Number(countRow?.count ?? 0)
+
+    if (updated > 0) {
+      await env.ASMR_DB
+        .prepare('UPDATE links SET category = ?, updated_at = ? WHERE category = ?')
+        .bind(payload.to, new Date().toISOString(), payload.from)
+        .run()
+    }
+
+    const existingToMeta = await env.ASMR_DB
+      .prepare('SELECT category FROM category_meta WHERE category = ? LIMIT 1')
+      .bind(payload.to)
+      .first<{ category: string }>()
+    const fromMeta = await env.ASMR_DB
+      .prepare('SELECT sort_order FROM category_meta WHERE category = ? LIMIT 1')
+      .bind(payload.from)
+      .first<{ sort_order: number | string }>()
+
+    if (!existingToMeta) {
+      await env.ASMR_DB
+        .prepare('INSERT OR IGNORE INTO category_meta (category, sort_order) VALUES (?, ?)')
+        .bind(payload.to, Number(fromMeta?.sort_order ?? 100))
+        .run()
+    }
+
+    await env.ASMR_DB
+      .prepare('DELETE FROM category_meta WHERE category = ?')
+      .bind(payload.from)
+      .run()
+
+    return json({ updated, from: payload.from, to: payload.to })
+  }
+
+  if (url.pathname === '/api/categories/order' && request.method === 'POST') {
+    const authError = await requireAdmin(request, env)
+
+    if (authError) {
+      return authError
+    }
+
+    const payload = buildCategoryOrderPayload(await request.json().catch(() => null))
+
+    if (!payload) {
+      return json({ error: 'Invalid category order payload.' }, 400)
+    }
+
+    for (const [index, category] of payload.categories.entries()) {
+      await env.ASMR_DB
+        .prepare(`
+          INSERT INTO category_meta (category, sort_order)
+          VALUES (?, ?)
+          ON CONFLICT(category) DO UPDATE SET sort_order = excluded.sort_order
+        `)
+        .bind(category, (index + 1) * 10)
+        .run()
+    }
+
+    return json({ ok: true, categories: await listCategories(env) })
+  }
+
   if (url.pathname === '/api/links/import' && request.method === 'POST') {
     const authError = await requireAdmin(request, env)
 
@@ -533,6 +741,8 @@ async function handleApi(request: Request, env: Env) {
     }
 
     if (mode === 'replace') {
+      await env.ASMR_DB.exec('DELETE FROM link_common')
+      await env.ASMR_DB.exec('DELETE FROM category_meta')
       await env.ASMR_DB.exec('DELETE FROM links')
     }
 
@@ -584,6 +794,7 @@ async function handleApi(request: Request, env: Env) {
         return authError
       }
 
+      await env.ASMR_DB.prepare('DELETE FROM link_common WHERE link_id = ?').bind(id).run()
       await env.ASMR_DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run()
       return json({ ok: true })
     }

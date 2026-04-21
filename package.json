@@ -10,8 +10,8 @@
     "cf:dev": "npm run build && wrangler dev",
     "cf:deploy": "npm run build && wrangler deploy",
     "d1:create": "wrangler d1 create asmr-nav",
-    "d1:migrate:local": "wrangler d1 migrations apply asmr-nav --local",
-    "d1:migrate:remote": "wrangler d1 migrations apply asmr-nav --remote"
+    "d1:migrate:local": "wrangler d1 migrations apply ASMR_DB --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply ASMR_DB --remote"
   },
   "dependencies": {
     "vue": "^3.5.32",

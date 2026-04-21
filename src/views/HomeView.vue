@@ -6,10 +6,10 @@ import { useNavLibrary } from '../composables/useNavLibrary'
 import type { NavLink } from '../types/nav'
 import { formatClock, formatDateLabel } from '../utils/format'
 
-const { links, backendReachable, syncState } = useNavLibrary()
+const { links, categories, backendReachable, syncState } = useNavLibrary()
 const now = ref(new Date())
 const searchQuery = ref('')
-const selectedSearchEngine = ref('baidu')
+const selectedSearchEngine = ref('google')
 const clickCounts = ref<Record<string, number>>({})
 const CLICK_STORAGE_KEY = 'asmr-nav.click-counts.v1'
 const COMMON_CATEGORY = '常用推荐'
@@ -17,6 +17,13 @@ const COLLECTION_CATEGORY = '收藏'
 const COMMON_LIMIT = 4
 
 const searchEngines = [
+  {
+    id: 'google',
+    label: 'Google',
+    buttonLabel: 'Google',
+    placeholder: '用 Google 搜索...',
+    buildUrl: (query: string) => `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+  },
   {
     id: 'baidu',
     label: '百度',
@@ -30,13 +37,6 @@ const searchEngines = [
     buttonLabel: '搜B站',
     placeholder: '在 B 站搜索 ASMR...',
     buildUrl: (query: string) => `https://search.bilibili.com/all?keyword=${encodeURIComponent(query)}`,
-  },
-  {
-    id: 'google',
-    label: 'Google',
-    buttonLabel: 'Google',
-    placeholder: '用 Google 搜索...',
-    buildUrl: (query: string) => `https://www.google.com/search?q=${encodeURIComponent(query)}`,
   },
   {
     id: 'missevan',
@@ -63,46 +63,52 @@ const currentSearchEngine = computed(() =>
 )
 
 const commonLinks = computed(() => {
-  const selected = new Map<string, NavLink>()
-  const clickedLinks = [...links.value]
-    .filter((link) => getClickCount(link) > 0)
+  return [...links.value]
+    .map((link) => ({
+      link,
+      clickCount: getClickCount(link),
+      score: getCommonScore(link),
+    }))
+    .filter((item) => item.score > 0)
     .sort((left, right) => {
-      const clickDiff = getClickCount(right) - getClickCount(left)
+      const scoreDiff = right.score - left.score
+
+      if (scoreDiff !== 0) {
+        return scoreDiff
+      }
+
+      const clickDiff = right.clickCount - left.clickCount
 
       if (clickDiff !== 0) {
         return clickDiff
       }
 
-      return left.title.localeCompare(right.title, 'zh-CN')
-    })
+      const commonDiff = Number(right.link.isCommon) - Number(left.link.isCommon)
 
-  clickedLinks.forEach((link) => {
-    if (selected.size < COMMON_LIMIT) {
-      selected.set(link.id, link)
-    }
-  })
-
-  links.value
-    .filter((link) => link.category === COMMON_CATEGORY)
-    .sort((left, right) => left.sortOrder - right.sortOrder)
-    .forEach((link) => {
-      if (selected.size < COMMON_LIMIT) {
-        selected.set(link.id, link)
+      if (commonDiff !== 0) {
+        return commonDiff
       }
-    })
 
-  return Array.from(selected.values()).slice(0, COMMON_LIMIT)
+      const categoryDiff = getDisplayCategoryRank(left.link.category) - getDisplayCategoryRank(right.link.category)
+
+      if (categoryDiff !== 0) {
+        return categoryDiff
+      }
+
+      if (left.link.sortOrder !== right.link.sortOrder) {
+        return left.link.sortOrder - right.link.sortOrder
+      }
+
+      return left.link.title.localeCompare(right.link.title, 'zh-CN')
+    })
+    .slice(0, COMMON_LIMIT)
+    .map((item) => item.link)
 })
 
 const groupedLinks = computed(() => {
-  const commonIds = new Set(commonLinks.value.map((link) => link.id))
   const groups = new Map<string, NavLink[]>()
 
   links.value.forEach((link) => {
-    if (commonIds.has(link.id)) {
-      return
-    }
-
     const category = getRegularCategory(link)
     groups.set(category, [...(groups.get(category) ?? []), link])
   })
@@ -127,7 +133,7 @@ const statusText = computed(() => {
     return '同步中'
   }
 
-  return backendReachable.value ? 'Worker' : '本地'
+  return backendReachable.value ? 'Online' : '本地'
 })
 
 function trackById(link: NavLink) {
@@ -138,11 +144,11 @@ function getClickCount(link: NavLink) {
   return clickCounts.value[link.id] ?? 0
 }
 
-function getRegularCategory(link: NavLink) {
-  if (link.category === COMMON_CATEGORY || link.category === '推荐') {
-    return COLLECTION_CATEGORY
-  }
+function getCommonScore(link: NavLink) {
+  return (link.isCommon ? 1 : 0) + getClickCount(link)
+}
 
+function getRegularCategory(link: NavLink) {
   return link.category || COLLECTION_CATEGORY
 }
 
@@ -151,17 +157,15 @@ function getDisplayCategoryRank(category: string) {
     return 0
   }
 
-  if (category === COLLECTION_CATEGORY) {
-    return 1
-  }
-
-  return 10
+  const index = categories.value.indexOf(category)
+  return index === -1 ? 1000 : index + 1
 }
 
 function loadClickCounts() {
   try {
     const raw = localStorage.getItem(CLICK_STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : null
+
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       clickCounts.value = {}
       return
@@ -229,7 +233,7 @@ onBeforeUnmount(() => {
 
     <header class="page-header">
       <h1>ASMR收藏夹</h1>
-      <p>有你想要的吗？</p>
+      <p>听什么比较好？</p>
     </header>
 
     <section class="top-widget" aria-label="当前时间">

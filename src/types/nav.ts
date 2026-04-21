@@ -5,6 +5,7 @@ export interface NavLink {
   category: string
   description: string
   icon: string
+  isCommon: boolean
   sortOrder: number
   createdAt: string
   updatedAt: string

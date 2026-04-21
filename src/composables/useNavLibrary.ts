@@ -4,12 +4,18 @@ import type { ImportMode, NavLink, NavLinkMutation } from '../types/nav'
 
 const LINKS_STORAGE_KEY = 'asmr-nav.links.v1'
 const TOKEN_STORAGE_KEY = 'asmr-nav.session-token'
+const COMMON_CATEGORY = '常用推荐'
 const COLLECTION_CATEGORY = '收藏'
-const LEGACY_COLLECTION_CATEGORY = '推荐'
+const RECOMMEND_CATEGORY = '推荐'
 
 type SyncState = 'idle' | 'loading' | 'saving'
+type CategoryInfo = {
+  name: string
+  sortOrder: number
+}
 
 const links = ref<NavLink[]>([])
+const categoryOrders = ref<Record<string, number>>({})
 const hydrated = ref(false)
 const backendReachable = ref(false)
 const syncState = ref<SyncState>('idle')
@@ -19,6 +25,19 @@ let attemptedRemoteBootstrap = false
 
 function cloneDefaults() {
   return defaultLinks.map((link) => ({ ...link }))
+}
+
+function normalizeCategoryOrders(infos: CategoryInfo[] = []) {
+  return infos.reduce<Record<string, number>>((orders, info) => {
+    const name = normalizeCategory(info.name)
+    const sortOrder = Number(info.sortOrder)
+
+    if (name && Number.isFinite(sortOrder)) {
+      orders[name] = sortOrder
+    }
+
+    return orders
+  }, {})
 }
 
 function createId() {
@@ -55,7 +74,9 @@ function sanitizeLink(raw: unknown): NavLink | null {
   const candidate = raw as Partial<NavLink>
   const title = candidate.title?.trim() ?? ''
   const url = normalizeUrl(candidate.url ?? '')
-  const category = normalizeCategory(candidate.category ?? '')
+  const rawCategory = candidate.category ?? ''
+  const category = normalizeCategory(rawCategory)
+  const isCommon = Boolean(candidate.isCommon) || rawCategory.trim() === COMMON_CATEGORY
 
   if (!title || !url || !category) {
     return null
@@ -75,6 +96,7 @@ function sanitizeLink(raw: unknown): NavLink | null {
     category,
     description: candidate.description?.trim() ?? '',
     icon: candidate.icon?.trim().slice(0, 3) ?? '',
+    isCommon,
     sortOrder: Number.isFinite(candidate.sortOrder) ? Number(candidate.sortOrder) : 0,
     createdAt,
     updatedAt,
@@ -102,12 +124,16 @@ function sortLinks(list: NavLink[]) {
 }
 
 function categoryRank(category: string) {
-  if (category === '常用推荐') {
-    return 0
+  if (category in categoryOrders.value) {
+    return categoryOrders.value[category]
   }
 
-  if (category === COLLECTION_CATEGORY || category === LEGACY_COLLECTION_CATEGORY) {
+  if (category === COLLECTION_CATEGORY) {
     return 1
+  }
+
+  if (category === RECOMMEND_CATEGORY) {
+    return 2
   }
 
   return 10
@@ -115,12 +141,7 @@ function categoryRank(category: string) {
 
 function normalizeCategory(value: string) {
   const category = value.trim()
-
-  if (category === LEGACY_COLLECTION_CATEGORY) {
-    return COLLECTION_CATEGORY
-  }
-
-  return category
+  return category === COMMON_CATEGORY ? COLLECTION_CATEGORY : category
 }
 
 function persistLocalSnapshot() {
@@ -230,8 +251,9 @@ async function refreshLinks(options: { force?: boolean; silent?: boolean } = {})
   }
 
   try {
-    const payload = await requestJson<{ items: NavLink[] }>('/api/links')
+    const payload = await requestJson<{ items: NavLink[]; categories?: CategoryInfo[] }>('/api/links')
     const nextLinks = payload.items.map((item) => sanitizeLink(item)).filter(Boolean) as NavLink[]
+    categoryOrders.value = normalizeCategoryOrders(payload.categories)
     applyLinks(nextLinks)
     backendReachable.value = true
   } catch {
@@ -340,6 +362,90 @@ async function deleteLink(id: string) {
   }
 }
 
+async function renameCategory(fromCategory: string, toCategory: string) {
+  hydrate()
+  const from = normalizeCategory(fromCategory)
+  const to = normalizeCategory(toCategory)
+
+  if (!from || !to) {
+    throw new Error('请填写分类名称。')
+  }
+
+  if (from === to) {
+    return 0
+  }
+
+  syncState.value = 'saving'
+
+  try {
+    const payload = await requestJson<{ updated: number }>(
+      '/api/categories/rename',
+      {
+        method: 'POST',
+        body: JSON.stringify({ from, to }),
+      },
+      { auth: true },
+    )
+
+    await refreshLinks({ force: true, silent: true })
+    return payload.updated
+  } catch (error) {
+    if (backendReachable.value || authToken.value) {
+      throw error
+    }
+
+    const updated = links.value.filter((link) => link.category === from).length
+
+    if (updated > 0) {
+      applyLinks(links.value.map((link) => (
+        link.category === from
+          ? { ...link, category: to, updatedAt: new Date().toISOString() }
+          : link
+      )))
+    }
+
+    return updated
+  } finally {
+    syncState.value = 'idle'
+  }
+}
+
+async function updateCategoryOrder(nextCategories: string[]) {
+  hydrate()
+  const normalizedCategories = Array.from(new Set(nextCategories.map(normalizeCategory).filter(Boolean)))
+
+  if (!normalizedCategories.length) {
+    return
+  }
+
+  syncState.value = 'saving'
+
+  try {
+    await requestJson<{ ok: true }>(
+      '/api/categories/order',
+      {
+        method: 'POST',
+        body: JSON.stringify({ categories: normalizedCategories }),
+      },
+      { auth: true },
+    )
+
+    await refreshLinks({ force: true, silent: true })
+  } catch (error) {
+    if (backendReachable.value || authToken.value) {
+      throw error
+    }
+
+    categoryOrders.value = normalizedCategories.reduce<Record<string, number>>((orders, category, index) => {
+      orders[category] = (index + 1) * 10
+      return orders
+    }, {})
+    applyLinks(links.value)
+  } finally {
+    syncState.value = 'idle'
+  }
+}
+
 function exportLinks() {
   hydrate()
   return JSON.stringify(links.value, null, 2)
@@ -400,6 +506,8 @@ export function useNavLibrary() {
     refreshLinks,
     saveLink,
     deleteLink,
+    renameCategory,
+    updateCategoryOrder,
     exportLinks,
     importLinks,
   }

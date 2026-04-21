@@ -12,7 +12,7 @@ const router = createRouter({
       path: '/',
       name: 'home',
       component: HomeView,
-      meta: { title: 'ASMR收藏夹 - 有你想要的吗？' },
+      meta: { title: 'ASMR收藏夹 - 听什么比较好？' },
     },
     {
       path: '/admin',
