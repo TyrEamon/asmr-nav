@@ -888,39 +888,38 @@ function isYouTubeUrl(value: string) {
   }
 }
 
-function isYouTubeStreamsUrl(value: string) {
+function getYouTubeTab(value: string) {
   try {
     const url = new URL(value)
-    return isYouTubeUrl(value) && url.pathname.split('/').filter(Boolean).includes('streams')
+    const parts = url.pathname.split('/').filter(Boolean)
+
+    if (!isYouTubeUrl(value)) {
+      return ''
+    }
+
+    if (parts.includes('streams')) {
+      return 'streams'
+    }
+
+    if (parts.includes('videos')) {
+      return 'videos'
+    }
+
+    return ''
   } catch {
-    return false
+    return ''
   }
 }
 
-function getYouTubeStreamsUrl(source: ListenSource) {
+function isYouTubeTabUrl(value: string) {
+  return Boolean(getYouTubeTab(value))
+}
+
+function getYouTubeTabUrl(source: ListenSource) {
   const feedUrl = source.feedUrl.trim()
 
-  if (isYouTubeStreamsUrl(feedUrl)) {
+  if (isYouTubeTabUrl(feedUrl)) {
     return feedUrl
-  }
-
-  const rsshubChannelMatch = feedUrl.match(/\/youtube\/channel\/(UC[a-zA-Z0-9_-]+)/)
-
-  if (rsshubChannelMatch) {
-    return `https://www.youtube.com/channel/${rsshubChannelMatch[1]}/streams`
-  }
-
-  if (isYouTubeUrl(feedUrl)) {
-    const url = new URL(feedUrl)
-    const parts = url.pathname.split('/').filter(Boolean)
-
-    if (parts[0] === 'channel' && parts[1]?.startsWith('UC')) {
-      return `https://www.youtube.com/channel/${parts[1]}/streams`
-    }
-
-    if (parts[0]?.startsWith('@')) {
-      return `https://www.youtube.com/${parts[0]}/streams`
-    }
   }
 
   return ''
@@ -1003,8 +1002,8 @@ function extractYouTubeStreamsItems(html: string, source: ListenSource): ParsedF
   return items.slice(0, LISTEN_PAGE_SIZE)
 }
 
-async function fetchYouTubeStreamsShell(streamsUrl: string): Promise<YouTubeShell> {
-  const response = await fetch(streamsUrl, {
+async function fetchYouTubeTabShell(tabUrl: string): Promise<YouTubeShell> {
+  const response = await fetch(tabUrl, {
     headers: {
       'accept': 'text/html',
       'user-agent': 'Mozilla/5.0 ASMR-Nav/1.0',
@@ -1012,10 +1011,10 @@ async function fetchYouTubeStreamsShell(streamsUrl: string): Promise<YouTubeShel
   })
 
   if (!response.ok) {
-    throw new Error(`YouTube streams 页面请求失败：${response.status}`)
+      throw new Error(`YouTube 页面请求失败：${response.status}`)
   }
 
-  return extractYouTubeShell(await response.text(), streamsUrl)
+  return extractYouTubeShell(await response.text(), tabUrl)
 }
 
 async function fetchYouTubeContinuation(shell: YouTubeShell, cursor: string) {
@@ -1043,14 +1042,14 @@ async function fetchYouTubeContinuation(shell: YouTubeShell, cursor: string) {
   return response.text()
 }
 
-async function fetchYouTubeStreamsItems(source: ListenSource, mode: 'latest' | 'more'): Promise<ParsedFeedResult> {
-  const streamsUrl = getYouTubeStreamsUrl(source)
+async function fetchYouTubeTabItems(source: ListenSource, mode: 'latest' | 'more'): Promise<ParsedFeedResult> {
+  const tabUrl = getYouTubeTabUrl(source)
 
-  if (!streamsUrl) {
-    throw new Error('这个订阅源不支持补旧。请使用 YouTube streams 地址或 /youtube/channel/频道ID。')
+  if (!tabUrl) {
+    throw new Error('这个订阅源不支持补旧。')
   }
 
-  const shell = await fetchYouTubeStreamsShell(streamsUrl)
+  const shell = await fetchYouTubeTabShell(tabUrl)
   const firstCursor = source.nextCursor || extractYouTubeContinuationTokens(shell.html)[0] || ''
   const pageContent = mode === 'more' && firstCursor
     ? await fetchYouTubeContinuation(shell, firstCursor)
@@ -1062,7 +1061,7 @@ async function fetchYouTubeStreamsItems(source: ListenSource, mode: 'latest' | '
     .filter(Boolean) as ListenItem[]
 
   return {
-    fetchUrl: mode === 'more' && firstCursor ? `${streamsUrl}#more` : streamsUrl,
+    fetchUrl: mode === 'more' && firstCursor ? `${tabUrl}#more` : tabUrl,
     items,
     nextCursor,
   }
@@ -1194,11 +1193,11 @@ async function resolveFeedFetchUrl(env: Env, source: ListenSource) {
 
 async function fetchListenSourceItems(env: Env, source: ListenSource, mode: 'latest' | 'more' = 'latest'): Promise<ParsedFeedResult> {
   if (mode === 'more') {
-    return fetchYouTubeStreamsItems(source, 'more')
+    return fetchYouTubeTabItems(source, 'more')
   }
 
-  if (isYouTubeStreamsUrl(source.feedUrl)) {
-    return fetchYouTubeStreamsItems(source, 'latest')
+  if (isYouTubeTabUrl(source.feedUrl)) {
+    return fetchYouTubeTabItems(source, 'latest')
   }
 
   const fetchUrl = await resolveFeedFetchUrl(env, source)
