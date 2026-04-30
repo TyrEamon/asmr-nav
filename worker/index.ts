@@ -954,6 +954,31 @@ function isYouTubeTabUrl(value: string) {
   return Boolean(getYouTubeTab(value))
 }
 
+function getYouTubeTabUrlFromRsshubPath(value: string) {
+  try {
+    const url = new URL(value, 'https://rsshub.local')
+    const parts = url.pathname.split('/').filter(Boolean)
+
+    if (parts[0] !== 'youtube' || parts[1] !== 'channel' || !parts[2]?.startsWith('UC')) {
+      return ''
+    }
+
+    const tab = parts[3] ?? ''
+
+    if (tab === 'videos' || tab === 'video') {
+      return `https://www.youtube.com/channel/${parts[2]}/videos`
+    }
+
+    if (tab === 'streams' || tab === 'live') {
+      return `https://www.youtube.com/channel/${parts[2]}/streams`
+    }
+
+    return ''
+  } catch {
+    return ''
+  }
+}
+
 function getYouTubeTabUrl(source: ListenSource) {
   const feedUrl = source.feedUrl.trim()
 
@@ -961,7 +986,7 @@ function getYouTubeTabUrl(source: ListenSource) {
     return feedUrl
   }
 
-  return ''
+  return getYouTubeTabUrlFromRsshubPath(feedUrl)
 }
 
 function extractYouTubeContinuationTokens(content: string) {
@@ -988,6 +1013,132 @@ function extractYouTubeShell(html: string, fetchUrl: string): YouTubeShell {
   }
 
   return { html, fetchUrl, apiKey, clientVersion }
+}
+
+function parseJsonBlockAfter(content: string, marker: string) {
+  const markerIndex = content.indexOf(marker)
+
+  if (markerIndex === -1) {
+    return null
+  }
+
+  const start = content.indexOf('{', markerIndex)
+
+  if (start === -1) {
+    return null
+  }
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let index = start; index < content.length; index += 1) {
+    const char = content[index]
+
+    if (inString) {
+      escaped = char === '\\' ? !escaped : false
+
+      if (char === '"' && !escaped) {
+        inString = false
+      }
+
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      escaped = false
+      continue
+    }
+
+    if (char === '{') {
+      depth += 1
+      continue
+    }
+
+    if (char === '}') {
+      depth -= 1
+
+      if (depth === 0) {
+        try {
+          return JSON.parse(content.slice(start, index + 1))
+        } catch {
+          return null
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+function getRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function getYouTubeText(value: unknown): string {
+  if (typeof value === 'string') {
+    return value
+  }
+
+  const record = getRecord(value)
+
+  if (!record) {
+    return ''
+  }
+
+  if (typeof record.simpleText === 'string') {
+    return record.simpleText
+  }
+
+  if (Array.isArray(record.runs)) {
+    return record.runs
+      .map((run) => getRecord(run)?.text)
+      .filter((text): text is string => typeof text === 'string')
+      .join('')
+  }
+
+  const accessibilityData = getRecord(getRecord(record.accessibility)?.accessibilityData)
+  return typeof accessibilityData?.label === 'string' ? accessibilityData.label : ''
+}
+
+function getYouTubeThumbnail(value: unknown) {
+  const thumbnails = getRecord(value)?.thumbnails
+
+  if (!Array.isArray(thumbnails)) {
+    return ''
+  }
+
+  const thumbnail = [...thumbnails]
+    .map(getRecord)
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .reverse()
+    .find((item) => typeof item.url === 'string')
+
+  return typeof thumbnail?.url === 'string' ? thumbnail.url.replace(/\\u0026/g, '&') : ''
+}
+
+function parseYouTubePayloads(content: string) {
+  const payloads: unknown[] = []
+  const text = content.trim()
+
+  if (text.startsWith('{')) {
+    try {
+      payloads.push(JSON.parse(text))
+    } catch {
+      // The same parser also handles raw HTML below.
+    }
+  }
+
+  const initialData = parseJsonBlockAfter(content, 'ytInitialData')
+
+  if (initialData) {
+    payloads.push(initialData)
+  }
+
+  return payloads
 }
 
 function extractYouTubeStreamsItems(html: string, source: ListenSource): ParsedFeedItem[] {
@@ -1018,6 +1169,46 @@ function extractYouTubeStreamsItems(html: string, source: ListenSource): ParsedF
       guid: videoId,
     })
   }
+
+  function addRenderer(renderer: Record<string, unknown>) {
+    const videoId = extractJsonString(renderer.videoId)
+    const title = getYouTubeText(renderer.title)
+      || getYouTubeText(renderer.headline)
+      || getYouTubeText(renderer.accessibility)
+    const publishedAt = getYouTubeText(renderer.publishedTimeText)
+    const thumbnail = getYouTubeThumbnail(renderer.thumbnail)
+
+    addItem(videoId, decodeEntities(title), normalizeItemUrl(thumbnail), publishedAt)
+  }
+
+  function visitPayload(value: unknown) {
+    if (items.length >= LISTEN_PAGE_SIZE) {
+      return
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach(visitPayload)
+      return
+    }
+
+    const record = getRecord(value)
+
+    if (!record) {
+      return
+    }
+
+    ;['videoRenderer', 'gridVideoRenderer', 'compactVideoRenderer'].forEach((key) => {
+      const renderer = getRecord(record[key])
+
+      if (renderer) {
+        addRenderer(renderer)
+      }
+    })
+
+    Object.values(record).forEach(visitPayload)
+  }
+
+  parseYouTubePayloads(html).forEach(visitPayload)
 
   Array.from(html.matchAll(rendererPattern)).forEach((match) => {
     const block = match[1]
@@ -1095,7 +1286,13 @@ async function fetchYouTubeTabItems(source: ListenSource, mode: 'latest' | 'more
     : shell.html
   const nextCursor = extractYouTubeContinuationTokens(pageContent)[0] || ''
   const fetchedAt = new Date().toISOString()
-  const items = extractYouTubeStreamsItems(pageContent, source)
+  let rawItems = extractYouTubeStreamsItems(pageContent, source)
+
+  if (mode === 'latest' && !rawItems.length && firstCursor) {
+    rawItems = extractYouTubeStreamsItems(await fetchYouTubeContinuation(shell, firstCursor), source)
+  }
+
+  const items = rawItems
     .map((item) => cleanParsedItem(item, source, fetchedAt))
     .filter(Boolean) as ListenItem[]
 
@@ -1236,7 +1433,7 @@ async function fetchListenSourceItems(env: Env, source: ListenSource, mode: 'lat
     return fetchYouTubeTabItems(source, 'more')
   }
 
-  if (isYouTubeTabUrl(source.feedUrl)) {
+  if (getYouTubeTabUrl(source)) {
     return fetchYouTubeTabItems(source, 'latest')
   }
 

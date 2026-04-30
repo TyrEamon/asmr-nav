@@ -406,6 +406,7 @@ async function handleTestSource() {
 
 async function handleSyncSource(source: ListenSource) {
   try {
+    setNotice('success', `正在同步：${source.title}`)
     const result = await syncSource(source.id)
     setNotice('success', `同步完成：${source.title}，导入 ${result.imported} 条。`)
   } catch (error) {
@@ -415,6 +416,7 @@ async function handleSyncSource(source: ListenSource) {
 
 async function handleLoadMoreSource(source: ListenSource) {
   try {
+    setNotice('success', `正在补旧：${source.title}`)
     const result = await loadMoreSource(source.id)
     setNotice('success', `补旧完成：${source.title}，导入 ${result.imported} 条。`)
   } catch (error) {
@@ -860,10 +862,10 @@ onBeforeUnmount(() => {
               </div>
               <div class="source-actions">
                 <button class="btn btn-muted btn-small" type="button" :disabled="listenBusy" @click="handleSyncSource(source)">
-                  同步
+                  {{ listenBusy ? '处理中' : '同步' }}
                 </button>
                 <button class="btn btn-muted btn-small" type="button" :disabled="listenBusy" @click="handleLoadMoreSource(source)">
-                  补旧30
+                  {{ listenBusy ? '处理中' : '补旧30' }}
                 </button>
                 <button class="btn btn-muted btn-small" type="button" @click="fillSourceForm(source)">编辑</button>
                 <button class="btn btn-danger btn-small" type="button" @click="handleDeleteSource(source)">删除</button>
