@@ -1663,23 +1663,54 @@ a {
   }
 
   .listen-picker.is-expanded .listen-panel {
-    max-height: 390px;
+    max-height: 360px;
   }
 
   .listen-flip {
-    min-height: 310px;
+    min-height: 288px;
   }
 
   .listen-card-face {
-    padding: 18px;
+    padding: 16px;
+  }
+
+  .listen-card-back {
+    gap: 12px;
   }
 
   .listen-result-main {
-    grid-template-columns: 1fr;
+    display: block;
+  }
+
+  .listen-result-copy h3 {
+    font-size: 1.04rem;
+    line-height: 1.36;
+    -webkit-line-clamp: 3;
+  }
+
+  .listen-meta,
+  .listen-tags,
+  .listen-summary {
+    margin-top: 7px;
+    font-size: 0.78rem;
+  }
+
+  .listen-summary {
+    -webkit-line-clamp: 2;
   }
 
   .listen-cover {
-    max-width: 220px;
+    display: none;
+  }
+
+  .listen-actions {
+    gap: 8px;
+  }
+
+  .listen-primary-action,
+  .listen-secondary-action {
+    min-height: 40px;
+    padding: 0 16px;
   }
 
   .nav-grid {
