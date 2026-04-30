@@ -1678,6 +1678,10 @@ a {
     gap: 12px;
   }
 
+  .listen-card-back.has-cover::before {
+    transform: scale(1.16);
+  }
+
   .listen-result-main {
     display: block;
   }
