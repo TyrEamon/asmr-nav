@@ -1,16 +1,25 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import NavCard from '../components/NavCard.vue'
+import { useListenLibrary } from '../composables/useListenLibrary'
 import { useNavLibrary } from '../composables/useNavLibrary'
+import type { ListenItem } from '../types/listen'
 import type { NavLink } from '../types/nav'
 import { formatClock, formatDateLabel } from '../utils/format'
 
 const { links, categories, backendReachable, syncState } = useNavLibrary()
+const { getRandomItem } = useListenLibrary()
 const now = ref(new Date())
 const searchQuery = ref('')
 const selectedSearchEngine = ref('google')
 const clickCounts = ref<Record<string, number>>({})
+const expandedCategories = ref(new Set<string>())
+const userAdjustedExpansion = ref(false)
+const listenItem = ref<ListenItem | null>(null)
+const listenLoading = ref(false)
+const listenError = ref('')
+const listenFlipped = ref(false)
 const CLICK_STORAGE_KEY = 'asmr-nav.click-counts.v1'
 const COMMON_CATEGORY = '常用推荐'
 const COLLECTION_CATEGORY = '收藏'
@@ -136,8 +145,34 @@ const statusText = computed(() => {
   return backendReachable.value ? 'Online' : '本地'
 })
 
+watch(groupedLinks, (groups) => {
+  if (userAdjustedExpansion.value || groups.length === 0) {
+    return
+  }
+
+  expandedCategories.value = new Set(groups.slice(0, 2).map((group) => group.category))
+}, { immediate: true })
+
 function trackById(link: NavLink) {
   return link.id
+}
+
+function isCategoryExpanded(category: string) {
+  return expandedCategories.value.has(category)
+}
+
+function toggleCategory(category: string) {
+  userAdjustedExpansion.value = true
+
+  const nextCategories = new Set(expandedCategories.value)
+
+  if (nextCategories.has(category)) {
+    nextCategories.delete(category)
+  } else {
+    nextCategories.add(category)
+  }
+
+  expandedCategories.value = nextCategories
 }
 
 function getClickCount(link: NavLink) {
@@ -212,6 +247,70 @@ function handleSearch() {
   }
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function formatListenTime(value: string) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+async function drawListenCard() {
+  if (listenLoading.value) {
+    return
+  }
+
+  listenLoading.value = true
+  listenError.value = ''
+
+  try {
+    if (listenFlipped.value) {
+      listenFlipped.value = false
+      await wait(260)
+    }
+
+    const item = await getRandomItem()
+    listenItem.value = item
+
+    if (!item) {
+      listenError.value = '还没有可抽取的订阅内容。'
+    }
+
+    listenFlipped.value = true
+  } catch (error) {
+    listenItem.value = null
+    listenError.value = error instanceof Error ? error.message : '抽取失败。'
+    listenFlipped.value = true
+  } finally {
+    listenLoading.value = false
+  }
+}
+
+function openListenItem() {
+  if (!listenItem.value) {
+    return
+  }
+
+  const opened = window.open(listenItem.value.url, '_blank', 'noopener,noreferrer')
+
+  if (!opened) {
+    window.location.href = listenItem.value.url
+  }
+}
+
 onMounted(() => {
   loadClickCounts()
 
@@ -268,9 +367,77 @@ onBeforeUnmount(() => {
       </form>
     </section>
 
+    <section class="listen-picker" aria-label="今天听什么">
+      <header class="listen-picker-header">
+        <div>
+          <h2>今天听什么呢？</h2>
+          <p>翻开一张声音卡</p>
+        </div>
+        <span class="listen-source-pill">RSSHub / YouTube</span>
+      </header>
+
+      <div class="listen-flip" :class="{ 'is-flipped': listenFlipped }" :aria-busy="listenLoading">
+        <div class="listen-card-face listen-card-front">
+          <div>
+            <p class="listen-kicker">pick one</p>
+            <strong>从你的订阅里抽一条 ASMR</strong>
+            <span>不纠结了，先翻开看看。</span>
+          </div>
+          <button class="listen-primary-action" type="button" :disabled="listenLoading" @click="drawListenCard">
+            {{ listenLoading ? '抽取中' : '开始抽取' }}
+          </button>
+        </div>
+
+        <div class="listen-card-face listen-card-back">
+          <template v-if="listenItem">
+            <div class="listen-result-main">
+              <div class="listen-result-copy">
+                <p class="listen-kicker">{{ listenItem.platform }}</p>
+                <h3>{{ listenItem.title }}</h3>
+                <p class="listen-meta">
+                  {{ listenItem.author || listenItem.sourceTitle }}
+                  <span v-if="formatListenTime(listenItem.publishedAt)"> · {{ formatListenTime(listenItem.publishedAt) }}</span>
+                </p>
+                <p v-if="listenItem.tags.length" class="listen-tags">{{ listenItem.tags.join(' / ') }}</p>
+                <p v-if="listenItem.summary" class="listen-summary">{{ listenItem.summary }}</p>
+              </div>
+              <img v-if="listenItem.cover" class="listen-cover" :src="listenItem.cover" :alt="listenItem.title">
+            </div>
+            <div class="listen-actions">
+              <button class="listen-primary-action" type="button" @click="openListenItem">去听</button>
+              <button class="listen-secondary-action" type="button" :disabled="listenLoading" @click="drawListenCard">
+                换一个
+              </button>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="listen-result-copy">
+              <p class="listen-kicker">empty</p>
+              <h3>{{ listenError || '还没有可抽取的内容' }}</h3>
+              <p class="listen-meta">去后台添加订阅源并同步后，这里就能抽卡。</p>
+            </div>
+            <button class="listen-secondary-action" type="button" :disabled="listenLoading" @click="drawListenCard">
+              再试一次
+            </button>
+          </template>
+        </div>
+      </div>
+    </section>
+
     <section v-for="group in groupedLinks" :key="group.category" class="nav-container">
-      <h2 class="nav-title">{{ group.category }}</h2>
-      <div class="nav-grid">
+      <h2
+        class="nav-title"
+        role="button"
+        tabindex="0"
+        :aria-expanded="isCategoryExpanded(group.category)"
+        @click="toggleCategory(group.category)"
+        @keydown.enter.prevent="toggleCategory(group.category)"
+        @keydown.space.prevent="toggleCategory(group.category)"
+      >
+        {{ group.category }}
+      </h2>
+      <div v-if="isCategoryExpanded(group.category)" class="nav-grid">
         <NavCard
           v-for="link in group.items"
           :key="trackById(link)"

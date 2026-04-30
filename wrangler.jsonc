@@ -18,7 +18,12 @@
   ],
   "vars": {
     "AUTO_SEED_DEFAULTS": "true",
-    "SESSION_TTL_SECONDS": "28800"
+    "SESSION_TTL_SECONDS": "28800",
+    "RSSHUB_BASE_URL": "https://rsshub-tan-nine.vercel.app",
+    "FEED_SYNC_INTERVAL_MINUTES": "360"
+  },
+  "triggers": {
+    "crons": ["0 */6 * * *"]
   },
   "observability": {
     "enabled": true

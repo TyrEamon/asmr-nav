@@ -1,4 +1,5 @@
 import { defaultLinks } from '../src/data/defaultLinks'
+import type { ListenItem, ListenPlatform, ListenSource } from '../src/types/listen'
 import type { NavLink } from '../src/types/nav'
 
 interface AssetBinding {
@@ -25,6 +26,8 @@ interface Env {
   SESSION_SECRET?: string
   SESSION_TTL_SECONDS?: string
   AUTO_SEED_DEFAULTS?: string
+  RSSHUB_BASE_URL?: string
+  FEED_SYNC_INTERVAL_MINUTES?: string
 }
 
 interface LinkRow {
@@ -64,6 +67,57 @@ interface CategoryRow {
   sort_order: number
 }
 
+interface ListenSourceRow {
+  id: string
+  title: string
+  feed_url: string
+  platform: string
+  tags: string
+  enabled: number
+  sort_order: number
+  last_fetched_at: string
+  last_status: string
+  last_error: string
+  item_count: number | string | null
+  created_at: string
+  updated_at: string
+}
+
+interface ListenItemRow {
+  id: string
+  source_id: string
+  source_title: string
+  title: string
+  url: string
+  author: string
+  platform: string
+  published_at: string
+  summary: string
+  cover: string
+  tags: string
+  guid: string
+  fetched_at: string
+}
+
+interface ListenSourceInput {
+  title: string
+  feedUrl: string
+  platform: ListenPlatform
+  tags: string[]
+  enabled: boolean
+  sortOrder: number
+}
+
+interface ParsedFeedItem {
+  title: string
+  url: string
+  author: string
+  publishedAt: string
+  summary: string
+  cover: string
+  guid: string
+}
+
 interface SessionPayload {
   iat: number
   exp: number
@@ -81,11 +135,16 @@ const SCHEMA_STATEMENTS = [
   "CREATE TABLE IF NOT EXISTS links (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
   'CREATE TABLE IF NOT EXISTS link_common (link_id TEXT PRIMARY KEY)',
   'CREATE TABLE IF NOT EXISTS category_meta (category TEXT PRIMARY KEY, sort_order INTEGER NOT NULL DEFAULT 100)',
+  "CREATE TABLE IF NOT EXISTS listen_sources (id TEXT PRIMARY KEY, title TEXT NOT NULL, feed_url TEXT NOT NULL, platform TEXT NOT NULL DEFAULT 'rss', tags TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 100, last_fetched_at TEXT NOT NULL DEFAULT '', last_status TEXT NOT NULL DEFAULT 'idle', last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS listen_items (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, author TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT 'rss', published_at TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]', guid TEXT NOT NULL, fetched_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(source_id, guid))",
   "INSERT OR IGNORE INTO link_common (link_id) SELECT id FROM links WHERE category = '常用推荐'",
   "UPDATE links SET category = '收藏' WHERE category = '常用推荐'",
   "INSERT OR IGNORE INTO category_meta (category, sort_order) SELECT DISTINCT category, CASE category WHEN '收藏' THEN 10 WHEN '推荐' THEN 20 ELSE 100 END FROM links",
   'CREATE INDEX IF NOT EXISTS idx_links_category_sort ON links(category, sort_order, title COLLATE NOCASE)',
   'CREATE INDEX IF NOT EXISTS idx_links_updated ON links(updated_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_listen_sources_sort ON listen_sources(enabled DESC, sort_order ASC, title COLLATE NOCASE)',
+  'CREATE INDEX IF NOT EXISTS idx_listen_items_random ON listen_items(platform, published_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_listen_items_source ON listen_items(source_id, published_at DESC)',
 ]
 
 let schemaReady: Promise<void> | null = null
@@ -112,6 +171,77 @@ function normalizeUrl(raw: string) {
     } catch {
       return ''
     }
+  }
+}
+
+function normalizePlatform(value: string): ListenPlatform {
+  const platform = value.trim().toLowerCase()
+
+  if (platform === 'youtube' || platform === 'rsshub' || platform === 'rss') {
+    return platform
+  }
+
+  return 'other'
+}
+
+function normalizeTags(raw: unknown): string[] {
+  const values = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(/[,，\n]/)
+      : []
+
+  return Array.from(new Set(
+    values
+      .map((tag) => String(tag).trim())
+      .filter(Boolean)
+      .slice(0, 12),
+  ))
+}
+
+function parseStoredTags(raw: string) {
+  try {
+    return normalizeTags(JSON.parse(raw))
+  } catch {
+    return normalizeTags(raw)
+  }
+}
+
+function normalizeFeedUrl(raw: string) {
+  const value = raw.trim()
+
+  if (!value) {
+    return ''
+  }
+
+  if (value.startsWith('/')) {
+    return value
+  }
+
+  return normalizeUrl(value)
+}
+
+function buildListenSourcePayload(raw: unknown): ListenSourceInput | null {
+  if (!raw || typeof raw !== 'object') {
+    return null
+  }
+
+  const candidate = raw as Partial<ListenSourceInput> & { tags?: unknown }
+  const title = candidate.title?.trim() ?? ''
+  const feedUrl = normalizeFeedUrl(candidate.feedUrl ?? '')
+  const sortOrder = Number(candidate.sortOrder ?? 100)
+
+  if (!title || !feedUrl) {
+    return null
+  }
+
+  return {
+    title,
+    feedUrl,
+    platform: normalizePlatform(candidate.platform ?? 'rss'),
+    tags: normalizeTags(candidate.tags),
+    enabled: candidate.enabled !== false,
+    sortOrder: Number.isFinite(sortOrder) ? sortOrder : 100,
   }
 }
 
@@ -190,6 +320,42 @@ function rowToLink(row: LinkRow): NavLink {
     sortOrder: row.sort_order,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function rowToListenSource(row: ListenSourceRow): ListenSource {
+  return {
+    id: row.id,
+    title: row.title,
+    feedUrl: row.feed_url,
+    platform: normalizePlatform(row.platform),
+    tags: parseStoredTags(row.tags),
+    enabled: Boolean(row.enabled),
+    sortOrder: row.sort_order,
+    lastFetchedAt: row.last_fetched_at,
+    lastStatus: row.last_status,
+    lastError: row.last_error,
+    itemCount: Number(row.item_count ?? 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToListenItem(row: ListenItemRow): ListenItem {
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    sourceTitle: row.source_title,
+    title: row.title,
+    url: row.url,
+    author: row.author,
+    platform: normalizePlatform(row.platform),
+    publishedAt: row.published_at,
+    summary: row.summary,
+    cover: row.cover,
+    tags: parseStoredTags(row.tags),
+    guid: row.guid,
+    fetchedAt: row.fetched_at,
   }
 }
 
@@ -374,6 +540,672 @@ async function writeLink(env: Env, input: LinkInput, id?: string) {
   }
 
   return readLink(env, linkId)
+}
+
+async function listListenSources(env: Env) {
+  const result = await env.ASMR_DB
+    .prepare(`
+      SELECT
+        listen_sources.id,
+        listen_sources.title,
+        listen_sources.feed_url,
+        listen_sources.platform,
+        listen_sources.tags,
+        listen_sources.enabled,
+        listen_sources.sort_order,
+        listen_sources.last_fetched_at,
+        listen_sources.last_status,
+        listen_sources.last_error,
+        listen_sources.created_at,
+        listen_sources.updated_at,
+        COUNT(listen_items.id) AS item_count
+      FROM listen_sources
+      LEFT JOIN listen_items ON listen_items.source_id = listen_sources.id
+      GROUP BY listen_sources.id
+      ORDER BY listen_sources.enabled DESC, listen_sources.sort_order ASC, listen_sources.title COLLATE NOCASE ASC
+    `)
+    .all<ListenSourceRow>()
+
+  return result.results.map(rowToListenSource)
+}
+
+async function readListenSource(env: Env, id: string) {
+  const row = await env.ASMR_DB
+    .prepare(`
+      SELECT
+        listen_sources.id,
+        listen_sources.title,
+        listen_sources.feed_url,
+        listen_sources.platform,
+        listen_sources.tags,
+        listen_sources.enabled,
+        listen_sources.sort_order,
+        listen_sources.last_fetched_at,
+        listen_sources.last_status,
+        listen_sources.last_error,
+        listen_sources.created_at,
+        listen_sources.updated_at,
+        COUNT(listen_items.id) AS item_count
+      FROM listen_sources
+      LEFT JOIN listen_items ON listen_items.source_id = listen_sources.id
+      WHERE listen_sources.id = ?
+      GROUP BY listen_sources.id
+      LIMIT 1
+    `)
+    .bind(id)
+    .first<ListenSourceRow>()
+
+  return row ? rowToListenSource(row) : null
+}
+
+async function writeListenSource(env: Env, input: ListenSourceInput, id?: string) {
+  const existing = id ? await readListenSource(env, id) : null
+  const now = new Date().toISOString()
+  const sourceId = existing?.id ?? id ?? createId()
+  const createdAt = existing?.createdAt ?? now
+
+  await env.ASMR_DB
+    .prepare(`
+      INSERT INTO listen_sources (
+        id,
+        title,
+        feed_url,
+        platform,
+        tags,
+        enabled,
+        sort_order,
+        last_fetched_at,
+        last_status,
+        last_error,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        feed_url = excluded.feed_url,
+        platform = excluded.platform,
+        tags = excluded.tags,
+        enabled = excluded.enabled,
+        sort_order = excluded.sort_order,
+        updated_at = excluded.updated_at
+    `)
+    .bind(
+      sourceId,
+      input.title,
+      input.feedUrl,
+      input.platform,
+      JSON.stringify(input.tags),
+      input.enabled ? 1 : 0,
+      input.sortOrder,
+      existing?.lastFetchedAt ?? '',
+      existing?.lastStatus ?? 'idle',
+      existing?.lastError ?? '',
+      createdAt,
+      now,
+    )
+    .run()
+
+  return readListenSource(env, sourceId)
+}
+
+async function deleteListenSource(env: Env, id: string) {
+  await env.ASMR_DB.prepare('DELETE FROM listen_items WHERE source_id = ?').bind(id).run()
+  await env.ASMR_DB.prepare('DELETE FROM listen_sources WHERE id = ?').bind(id).run()
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function decodeEntities(value: string) {
+  const namedEntities: Record<string, string> = {
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    quot: '"',
+    apos: "'",
+    '#39': "'",
+  }
+
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 10)))
+    .replace(/&([a-zA-Z0-9#]+);/g, (match, name: string) => namedEntities[name] ?? match)
+}
+
+function stripHtml(value: string) {
+  return decodeEntities(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function truncate(value: string, maxLength: number) {
+  const text = stripHtml(value)
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text
+}
+
+function extractTag(block: string, tag: string) {
+  const pattern = new RegExp(`<${escapeRegExp(tag)}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapeRegExp(tag)}>`, 'i')
+  const match = block.match(pattern)
+  return match ? stripHtml(match[1]) : ''
+}
+
+function extractBlocks(xml: string, tag: string) {
+  const pattern = new RegExp(`<${escapeRegExp(tag)}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapeRegExp(tag)}>`, 'gi')
+  return Array.from(xml.matchAll(pattern), (match) => match[0])
+}
+
+function extractAttrFromTag(tagText: string, attr: string) {
+  const pattern = new RegExp(`${escapeRegExp(attr)}=["']([^"']+)["']`, 'i')
+  const match = tagText.match(pattern)
+  return match ? decodeEntities(match[1]).trim() : ''
+}
+
+function extractFirstTagAttr(block: string, tag: string, attr: string, requiredRel = '') {
+  const pattern = new RegExp(`<${escapeRegExp(tag)}\\b[^>]*>`, 'gi')
+  const matches = Array.from(block.matchAll(pattern), (match) => match[0])
+  const preferred = requiredRel
+    ? matches.find((tagText) => extractAttrFromTag(tagText, 'rel') === requiredRel)
+    : matches[0]
+  return preferred ? extractAttrFromTag(preferred, attr) : ''
+}
+
+function normalizeItemUrl(raw: string) {
+  const value = normalizeUrl(raw)
+
+  if (!value) {
+    return ''
+  }
+
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+function normalizeDate(raw: string) {
+  const timestamp = Date.parse(raw)
+  return Number.isNaN(timestamp) ? new Date().toISOString() : new Date(timestamp).toISOString()
+}
+
+function extractJsonString(value: unknown) {
+  return typeof value === 'string' ? stripHtml(value) : ''
+}
+
+function extractJsonAuthor(value: unknown, fallback = '') {
+  if (typeof value === 'string') {
+    return stripHtml(value)
+  }
+
+  if (value && typeof value === 'object') {
+    const author = value as { name?: unknown }
+    return extractJsonString(author.name)
+  }
+
+  return fallback
+}
+
+function parseJsonFeed(raw: unknown, source: ListenSource): ParsedFeedItem[] {
+  if (!raw || typeof raw !== 'object') {
+    return []
+  }
+
+  const payload = raw as { items?: unknown[] }
+
+  if (!Array.isArray(payload.items)) {
+    return []
+  }
+
+  return payload.items.map((item) => {
+    const entry = item as Record<string, unknown>
+    const authors = Array.isArray(entry.authors) ? entry.authors : []
+    const author = extractJsonAuthor(entry.author, extractJsonAuthor(authors[0], source.title))
+    const url = extractJsonString(entry.url)
+      || extractJsonString(entry.link)
+      || extractJsonString(entry.external_url)
+    const publishedAt = extractJsonString(entry.date_published)
+      || extractJsonString(entry.date_modified)
+      || extractJsonString(entry.pubDate)
+      || extractJsonString(entry.isoDate)
+
+    return {
+      title: extractJsonString(entry.title),
+      url,
+      author,
+      publishedAt,
+      summary: truncate(
+        extractJsonString(entry.summary)
+          || extractJsonString(entry.content_text)
+          || extractJsonString(entry.content_html)
+          || extractJsonString(entry.description),
+        240,
+      ),
+      cover: normalizeItemUrl(
+        extractJsonString(entry.image)
+          || extractJsonString(entry.banner_image)
+          || extractJsonString(entry.cover),
+      ),
+      guid: extractJsonString(entry.id) || extractJsonString(entry.guid) || url,
+    }
+  })
+}
+
+function parseXmlFeed(xml: string, source: ListenSource): ParsedFeedItem[] {
+  const atomEntries = extractBlocks(xml, 'entry')
+
+  if (atomEntries.length) {
+    return atomEntries.map((entry) => {
+      const link = extractFirstTagAttr(entry, 'link', 'href', 'alternate')
+        || extractFirstTagAttr(entry, 'link', 'href')
+
+      return {
+        title: extractTag(entry, 'title'),
+        url: link,
+        author: extractTag(entry, 'name') || source.title,
+        publishedAt: extractTag(entry, 'published') || extractTag(entry, 'updated'),
+        summary: truncate(
+          extractTag(entry, 'summary')
+            || extractTag(entry, 'content')
+            || extractTag(entry, 'media:description'),
+          240,
+        ),
+        cover: normalizeItemUrl(
+          extractFirstTagAttr(entry, 'media:thumbnail', 'url')
+            || extractFirstTagAttr(entry, 'media:content', 'url'),
+        ),
+        guid: extractTag(entry, 'yt:videoId') || extractTag(entry, 'id') || link,
+      }
+    })
+  }
+
+  return extractBlocks(xml, 'item').map((item) => {
+    const link = extractTag(item, 'link')
+
+    return {
+      title: extractTag(item, 'title'),
+      url: link,
+      author: extractTag(item, 'dc:creator') || extractTag(item, 'author') || source.title,
+      publishedAt: extractTag(item, 'pubDate') || extractTag(item, 'published') || extractTag(item, 'updated'),
+      summary: truncate(
+        extractTag(item, 'description')
+          || extractTag(item, 'content:encoded')
+          || extractTag(item, 'media:description'),
+        240,
+      ),
+      cover: normalizeItemUrl(
+        extractFirstTagAttr(item, 'media:thumbnail', 'url')
+          || extractFirstTagAttr(item, 'media:content', 'url')
+          || extractTag(item, 'enclosure'),
+      ),
+      guid: extractTag(item, 'guid') || link,
+    }
+  })
+}
+
+function parseFeedContent(content: string, contentType: string, source: ListenSource) {
+  const text = content.trim()
+
+  if (contentType.includes('json') || text.startsWith('{')) {
+    return parseJsonFeed(JSON.parse(text), source)
+  }
+
+  return parseXmlFeed(text, source)
+}
+
+function makeListenItemId(sourceId: string, guid: string) {
+  let hash = 0
+  const input = `${sourceId}:${guid}`
+
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) | 0
+  }
+
+  return `listen-${Math.abs(hash).toString(36)}`
+}
+
+function cleanParsedItem(item: ParsedFeedItem, source: ListenSource, fetchedAt: string): ListenItem | null {
+  const title = truncate(item.title, 160)
+  const url = normalizeItemUrl(item.url)
+  const guid = item.guid.trim() || url
+
+  if (!title || !url || !guid) {
+    return null
+  }
+
+  return {
+    id: makeListenItemId(source.id, guid),
+    sourceId: source.id,
+    sourceTitle: source.title,
+    title,
+    url,
+    author: truncate(item.author || source.title, 80),
+    platform: source.platform,
+    publishedAt: normalizeDate(item.publishedAt),
+    summary: truncate(item.summary, 240),
+    cover: normalizeItemUrl(item.cover),
+    tags: source.tags,
+    guid,
+    fetchedAt,
+  }
+}
+
+function shouldUseRsshubJson(source: ListenSource, url: URL) {
+  return source.platform === 'rsshub'
+    || source.feedUrl.startsWith('/')
+    || url.hostname.toLowerCase().includes('rsshub')
+}
+
+function withRsshubJsonFormat(source: ListenSource, value: string) {
+  const url = new URL(value)
+
+  if (shouldUseRsshubJson(source, url) && !url.searchParams.has('format')) {
+    url.searchParams.set('format', 'json')
+  }
+
+  return url.toString()
+}
+
+async function resolveYouTubeFeedUrl(value: string) {
+  const url = new URL(value)
+  const pathParts = url.pathname.split('/').filter(Boolean)
+  const firstPart = pathParts[0] ?? ''
+
+  if (url.pathname === '/feeds/videos.xml' && url.searchParams.get('channel_id')) {
+    return url.toString()
+  }
+
+  if (firstPart === 'channel' && pathParts[1]?.startsWith('UC')) {
+    return `https://www.youtube.com/feeds/videos.xml?channel_id=${pathParts[1]}`
+  }
+
+  if (firstPart.startsWith('@') || firstPart === 'c' || firstPart === 'user') {
+    const response = await fetch(url.toString(), {
+      headers: {
+        'accept': 'text/html',
+        'user-agent': 'Mozilla/5.0 ASMR-Nav/1.0',
+      },
+    })
+
+    if (!response.ok) {
+      throw new Error(`YouTube 页面请求失败：${response.status}`)
+    }
+
+    const html = await response.text()
+    const channelId = html.match(/"externalId":"(UC[^"]+)"/)?.[1]
+      || html.match(/"browseId":"(UC[^"]+)"/)?.[1]
+      || html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[^"]+)"/)?.[1]
+
+    if (!channelId) {
+      throw new Error('没有从 YouTube 页面解析到频道 ID。')
+    }
+
+    return `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`
+  }
+
+  return url.toString()
+}
+
+async function resolveFeedFetchUrl(env: Env, source: ListenSource) {
+  if (source.feedUrl.startsWith('/')) {
+    const base = env.RSSHUB_BASE_URL?.trim()
+
+    if (!base) {
+      throw new Error('RSSHUB_BASE_URL is not configured.')
+    }
+
+    return withRsshubJsonFormat(source, new URL(source.feedUrl, base).toString())
+  }
+
+  const url = new URL(source.feedUrl)
+  const host = url.hostname.toLowerCase()
+
+  if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') {
+    return resolveYouTubeFeedUrl(url.toString())
+  }
+
+  return withRsshubJsonFormat(source, url.toString())
+}
+
+async function fetchListenSourceItems(env: Env, source: ListenSource) {
+  const fetchUrl = await resolveFeedFetchUrl(env, source)
+  const response = await fetch(fetchUrl, {
+    headers: {
+      'accept': 'application/json, application/xml, text/xml;q=0.9, */*;q=0.8',
+      'user-agent': 'ASMR-Nav/1.0 (+https://asmr-nav)',
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`订阅源请求失败：${response.status}`)
+  }
+
+  const content = await response.text()
+  const contentType = response.headers.get('content-type') ?? ''
+  const fetchedAt = new Date().toISOString()
+  const items = parseFeedContent(content, contentType, source)
+    .map((item) => cleanParsedItem(item, source, fetchedAt))
+    .filter(Boolean) as ListenItem[]
+
+  return {
+    fetchUrl,
+    items,
+  }
+}
+
+async function updateListenSourceStatus(env: Env, id: string, status: string, error = '') {
+  await env.ASMR_DB
+    .prepare(`
+      UPDATE listen_sources
+      SET last_status = ?, last_error = ?, updated_at = ?
+      WHERE id = ?
+    `)
+    .bind(status, error, new Date().toISOString(), id)
+    .run()
+}
+
+async function syncListenSource(env: Env, id: string) {
+  const source = await readListenSource(env, id)
+
+  if (!source) {
+    throw new Error('订阅源不存在。')
+  }
+
+  await updateListenSourceStatus(env, id, 'syncing')
+
+  try {
+    const { fetchUrl, items } = await fetchListenSourceItems(env, source)
+    const now = new Date().toISOString()
+
+    for (const item of items.slice(0, 50)) {
+      await env.ASMR_DB
+        .prepare(`
+          INSERT INTO listen_items (
+            id,
+            source_id,
+            title,
+            url,
+            author,
+            platform,
+            published_at,
+            summary,
+            cover,
+            tags,
+            guid,
+            fetched_at,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(source_id, guid) DO UPDATE SET
+            title = excluded.title,
+            url = excluded.url,
+            author = excluded.author,
+            platform = excluded.platform,
+            published_at = excluded.published_at,
+            summary = excluded.summary,
+            cover = excluded.cover,
+            tags = excluded.tags,
+            fetched_at = excluded.fetched_at,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          item.id,
+          item.sourceId,
+          item.title,
+          item.url,
+          item.author,
+          item.platform,
+          item.publishedAt,
+          item.summary,
+          item.cover,
+          JSON.stringify(item.tags),
+          item.guid,
+          item.fetchedAt,
+          now,
+          now,
+        )
+        .run()
+    }
+
+    await env.ASMR_DB
+      .prepare(`
+        DELETE FROM listen_items
+        WHERE source_id = ?
+          AND id NOT IN (
+            SELECT id
+            FROM listen_items
+            WHERE source_id = ?
+            ORDER BY published_at DESC, fetched_at DESC
+            LIMIT 50
+          )
+      `)
+      .bind(source.id, source.id)
+      .run()
+
+    await env.ASMR_DB
+      .prepare(`
+        UPDATE listen_sources
+        SET last_fetched_at = ?, last_status = ?, last_error = '', updated_at = ?
+        WHERE id = ?
+      `)
+      .bind(now, items.length ? 'success' : 'empty', now, id)
+      .run()
+
+    return {
+      source: await readListenSource(env, id),
+      imported: items.length,
+      fetchUrl,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '同步失败。'
+    await updateListenSourceStatus(env, id, 'error', message)
+    throw error
+  }
+}
+
+async function syncDueListenSources(env: Env, force = false) {
+  await ensureSeedData(env)
+
+  const intervalMinutes = Math.max(15, Number.parseInt(env.FEED_SYNC_INTERVAL_MINUTES ?? '360', 10) || 360)
+  const cutoff = new Date(Date.now() - intervalMinutes * 60 * 1000).toISOString()
+  const result = await env.ASMR_DB
+    .prepare(`
+      SELECT
+        listen_sources.id,
+        listen_sources.title,
+        listen_sources.feed_url,
+        listen_sources.platform,
+        listen_sources.tags,
+        listen_sources.enabled,
+        listen_sources.sort_order,
+        listen_sources.last_fetched_at,
+        listen_sources.last_status,
+        listen_sources.last_error,
+        listen_sources.created_at,
+        listen_sources.updated_at,
+        COUNT(listen_items.id) AS item_count
+      FROM listen_sources
+      LEFT JOIN listen_items ON listen_items.source_id = listen_sources.id
+      WHERE listen_sources.enabled = 1
+        AND (? = 1 OR listen_sources.last_fetched_at = '' OR listen_sources.last_fetched_at < ?)
+      GROUP BY listen_sources.id
+      ORDER BY listen_sources.sort_order ASC, listen_sources.title COLLATE NOCASE ASC
+      LIMIT 12
+    `)
+    .bind(force ? 1 : 0, cutoff)
+    .all<ListenSourceRow>()
+
+  const sources = result.results.map(rowToListenSource)
+  let synced = 0
+  let failed = 0
+
+  for (const source of sources) {
+    try {
+      await syncListenSource(env, source.id)
+      synced += 1
+    } catch {
+      failed += 1
+    }
+  }
+
+  return { synced, failed, checked: sources.length }
+}
+
+async function pickRandomListenItem(env: Env, url: URL) {
+  const platform = normalizePlatform(url.searchParams.get('platform') ?? '')
+  const sourceId = url.searchParams.get('sourceId')?.trim() ?? ''
+  const tag = url.searchParams.get('tag')?.trim() ?? ''
+  const requestedFreshDays = Number.parseInt(url.searchParams.get('freshDays') ?? '90', 10)
+  const freshDays = Number.isFinite(requestedFreshDays) ? Math.min(Math.max(requestedFreshDays, 1), 3650) : 90
+  const cutoff = new Date(Date.now() - freshDays * 24 * 60 * 60 * 1000).toISOString()
+
+  const pick = (withCutoff: boolean) => env.ASMR_DB
+    .prepare(`
+      SELECT
+        listen_items.id,
+        listen_items.source_id,
+        listen_sources.title AS source_title,
+        listen_items.title,
+        listen_items.url,
+        listen_items.author,
+        listen_items.platform,
+        listen_items.published_at,
+        listen_items.summary,
+        listen_items.cover,
+        listen_items.tags,
+        listen_items.guid,
+        listen_items.fetched_at
+      FROM listen_items
+      JOIN listen_sources ON listen_sources.id = listen_items.source_id
+      WHERE listen_sources.enabled = 1
+        AND (? = 'other' OR listen_items.platform = ?)
+        AND (? = '' OR listen_items.source_id = ?)
+        AND (? = '' OR listen_items.tags LIKE ?)
+        AND (? = 0 OR listen_items.published_at >= ?)
+      ORDER BY RANDOM()
+      LIMIT 1
+    `)
+    .bind(
+      platform,
+      platform,
+      sourceId,
+      sourceId,
+      tag,
+      `%${tag}%`,
+      withCutoff ? 1 : 0,
+      cutoff,
+    )
+    .first<ListenItemRow>()
+
+  const row = await pick(true) ?? await pick(false)
+  return row ? rowToListenItem(row) : null
 }
 
 async function ensureSeedData(env: Env) {
@@ -626,6 +1458,10 @@ async function handleApi(request: Request, env: Env) {
     })
   }
 
+  if (url.pathname === '/api/listen/random' && request.method === 'GET') {
+    return json({ item: await pickRandomListenItem(env, url) })
+  }
+
   if (url.pathname === '/api/links' && request.method === 'POST') {
     const authError = await requireAdmin(request, env)
 
@@ -721,6 +1557,134 @@ async function handleApi(request: Request, env: Env) {
     }
 
     return json({ ok: true, categories: await listCategories(env) })
+  }
+
+  if (url.pathname === '/api/listen/sources' && request.method === 'GET') {
+    const authError = await requireAdmin(request, env)
+
+    if (authError) {
+      return authError
+    }
+
+    return json({ items: await listListenSources(env) })
+  }
+
+  if (url.pathname === '/api/listen/sources' && request.method === 'POST') {
+    const authError = await requireAdmin(request, env)
+
+    if (authError) {
+      return authError
+    }
+
+    const payload = buildListenSourcePayload(await request.json().catch(() => null))
+
+    if (!payload) {
+      return json({ error: 'Invalid listen source payload.' }, 400)
+    }
+
+    return json({ item: await writeListenSource(env, payload) }, 201)
+  }
+
+  if (url.pathname === '/api/listen/test' && request.method === 'POST') {
+    const authError = await requireAdmin(request, env)
+
+    if (authError) {
+      return authError
+    }
+
+    const payload = buildListenSourcePayload(await request.json().catch(() => null))
+
+    if (!payload) {
+      return json({ error: 'Invalid listen source payload.' }, 400)
+    }
+
+    const now = new Date().toISOString()
+    const source: ListenSource = {
+      id: 'test-source',
+      title: payload.title,
+      feedUrl: payload.feedUrl,
+      platform: payload.platform,
+      tags: payload.tags,
+      enabled: payload.enabled,
+      sortOrder: payload.sortOrder,
+      lastFetchedAt: '',
+      lastStatus: 'testing',
+      lastError: '',
+      itemCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const result = await fetchListenSourceItems(env, source)
+
+    return json({
+      ok: true,
+      fetchUrl: result.fetchUrl,
+      count: result.items.length,
+      sample: result.items.slice(0, 3),
+    })
+  }
+
+  if (url.pathname === '/api/listen/sync' && request.method === 'POST') {
+    const authError = await requireAdmin(request, env)
+
+    if (authError) {
+      return authError
+    }
+
+    return json(await syncDueListenSources(env, true))
+  }
+
+  if (url.pathname.startsWith('/api/listen/sources/')) {
+    const parts = url.pathname.replace('/api/listen/sources/', '').split('/').filter(Boolean)
+    const id = decodeURIComponent(parts[0] ?? '').trim()
+    const action = parts[1] ?? ''
+
+    if (!id) {
+      return json({ error: 'Listen source id is required.' }, 400)
+    }
+
+    if (request.method === 'POST' && action === 'sync') {
+      const authError = await requireAdmin(request, env)
+
+      if (authError) {
+        return authError
+      }
+
+      return json(await syncListenSource(env, id))
+    }
+
+    if (request.method === 'PUT' && !action) {
+      const authError = await requireAdmin(request, env)
+
+      if (authError) {
+        return authError
+      }
+
+      const payload = buildListenSourcePayload(await request.json().catch(() => null))
+
+      if (!payload) {
+        return json({ error: 'Invalid listen source payload.' }, 400)
+      }
+
+      const existing = await readListenSource(env, id)
+
+      if (!existing) {
+        return json({ error: 'Listen source not found.' }, 404)
+      }
+
+      return json({ item: await writeListenSource(env, payload, id) })
+    }
+
+    if (request.method === 'DELETE' && !action) {
+      const authError = await requireAdmin(request, env)
+
+      if (authError) {
+        return authError
+      }
+
+      await deleteListenSource(env, id)
+      return json({ ok: true })
+    }
   }
 
   if (url.pathname === '/api/links/import' && request.method === 'POST') {
@@ -821,5 +1785,8 @@ export default {
         500,
       )
     }
+  },
+  scheduled(_controller: unknown, env: Env, ctx: { waitUntil(promise: Promise<unknown>): void }) {
+    ctx.waitUntil(syncDueListenSources(env))
   },
 }

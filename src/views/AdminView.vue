@@ -2,7 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { ImportMode, NavLink } from '../types/nav'
+import type { ListenPlatform, ListenSource } from '../types/listen'
 import { useNavLibrary } from '../composables/useNavLibrary'
+import { useListenLibrary } from '../composables/useListenLibrary'
 import { downloadTextFile, getHostLabel } from '../utils/format'
 
 type AuthState = 'checking' | 'guest' | 'ready'
@@ -17,6 +19,15 @@ interface FormState {
   sortOrder: number
 }
 
+interface SourceFormState {
+  title: string
+  feedUrl: string
+  platform: ListenPlatform
+  tagsText: string
+  enabled: boolean
+  sortOrder: number
+}
+
 function createEmptyForm(category = ''): FormState {
   return {
     title: '',
@@ -25,6 +36,17 @@ function createEmptyForm(category = ''): FormState {
     description: '',
     icon: '',
     isCommon: false,
+    sortOrder: 100,
+  }
+}
+
+function createEmptySourceForm(): SourceFormState {
+  return {
+    title: '',
+    feedUrl: '',
+    platform: 'youtube',
+    tagsText: '',
+    enabled: true,
     sortOrder: 100,
   }
 }
@@ -46,6 +68,17 @@ const {
   importLinks,
 } = useNavLibrary()
 
+const {
+  sources: listenSources,
+  syncState: listenSyncState,
+  refreshSources,
+  saveSource,
+  deleteSource,
+  testSource,
+  syncSource,
+  syncAllSources,
+} = useListenLibrary()
+
 const authState = ref<AuthState>('checking')
 const password = ref('')
 const loginError = ref('')
@@ -65,9 +98,21 @@ const activeCategory = ref('all')
 const importText = ref('')
 const importMode = ref<ImportMode>('merge')
 const notice = ref<{ type: 'success' | 'error'; message: string } | null>(null)
+const sourceForm = reactive(createEmptySourceForm())
+const sourceEditingId = ref<string | null>(null)
+const sourceTestResult = ref<{ fetchUrl: string; count: number; sampleTitle: string } | null>(null)
 
 let noticeTimer: ReturnType<typeof setTimeout> | null = null
 let categorySelectTimer: ReturnType<typeof setTimeout> | null = null
+
+const sourcePlatformOptions: { value: ListenPlatform; label: string }[] = [
+  { value: 'youtube', label: 'YouTube' },
+  { value: 'rsshub', label: 'RSSHub' },
+  { value: 'rss', label: 'RSS' },
+  { value: 'other', label: '其他' },
+]
+
+const listenBusy = computed(() => listenSyncState.value !== 'idle')
 
 const filteredLinks = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -119,6 +164,12 @@ function resetForm() {
   editingId.value = null
 }
 
+function resetSourceForm() {
+  Object.assign(sourceForm, createEmptySourceForm())
+  sourceEditingId.value = null
+  sourceTestResult.value = null
+}
+
 function fillForm(link: NavLink) {
   editingId.value = link.id
   form.title = link.title
@@ -129,6 +180,18 @@ function fillForm(link: NavLink) {
   form.isCommon = link.isCommon
   form.sortOrder = link.sortOrder
   customCategory.value = !categoryOptions.value.includes(link.category)
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function fillSourceForm(source: ListenSource) {
+  sourceEditingId.value = source.id
+  sourceForm.title = source.title
+  sourceForm.feedUrl = source.feedUrl
+  sourceForm.platform = source.platform
+  sourceForm.tagsText = source.tags.join('，')
+  sourceForm.enabled = source.enabled
+  sourceForm.sortOrder = source.sortOrder
+  sourceTestResult.value = null
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -266,6 +329,7 @@ async function submitLogin() {
     await login(password.value)
     password.value = ''
     authState.value = 'ready'
+    await refreshSources()
     setNotice('success', '已进入后台。')
   } catch (error) {
     loginError.value = error instanceof Error ? error.message : '登录失败。'
@@ -278,6 +342,7 @@ function handleLogout() {
   logout()
   authState.value = 'guest'
   resetForm()
+  resetSourceForm()
 }
 
 async function submitForm() {
@@ -298,6 +363,78 @@ async function submitForm() {
     resetForm()
   } catch (error) {
     setNotice('error', error instanceof Error ? error.message : '保存失败。')
+  }
+}
+
+function buildSourcePayload() {
+  return {
+    id: sourceEditingId.value ?? undefined,
+    title: sourceForm.title,
+    feedUrl: sourceForm.feedUrl,
+    platform: sourceForm.platform,
+    tags: sourceForm.tagsText.split(/[,，\n]/).map((tag) => tag.trim()).filter(Boolean),
+    enabled: sourceForm.enabled,
+    sortOrder: sourceForm.sortOrder,
+  }
+}
+
+async function submitSourceForm() {
+  try {
+    const saved = await saveSource(buildSourcePayload())
+    setNotice('success', sourceEditingId.value ? `已更新订阅源：${saved.title}` : `已新增订阅源：${saved.title}`)
+    resetSourceForm()
+  } catch (error) {
+    setNotice('error', error instanceof Error ? error.message : '订阅源保存失败。')
+  }
+}
+
+async function handleTestSource() {
+  try {
+    const result = await testSource(buildSourcePayload())
+    sourceTestResult.value = {
+      fetchUrl: result.fetchUrl,
+      count: result.count,
+      sampleTitle: result.sample[0]?.title ?? '暂无条目',
+    }
+    setNotice('success', `测试成功：读取到 ${result.count} 条。`)
+  } catch (error) {
+    sourceTestResult.value = null
+    setNotice('error', error instanceof Error ? error.message : '订阅源测试失败。')
+  }
+}
+
+async function handleSyncSource(source: ListenSource) {
+  try {
+    const result = await syncSource(source.id)
+    setNotice('success', `同步完成：${source.title}，导入 ${result.imported} 条。`)
+  } catch (error) {
+    setNotice('error', error instanceof Error ? error.message : '订阅源同步失败。')
+  }
+}
+
+async function handleSyncAllSources() {
+  try {
+    const result = await syncAllSources()
+    setNotice('success', `同步完成：成功 ${result.synced} 个，失败 ${result.failed} 个。`)
+  } catch (error) {
+    setNotice('error', error instanceof Error ? error.message : '订阅源同步失败。')
+  }
+}
+
+async function handleDeleteSource(source: ListenSource) {
+  if (!window.confirm(`确定删除订阅源「${source.title}」吗？缓存条目也会一起删除。`)) {
+    return
+  }
+
+  try {
+    await deleteSource(source.id)
+    setNotice('success', `已删除订阅源：${source.title}`)
+
+    if (sourceEditingId.value === source.id) {
+      resetSourceForm()
+    }
+  } catch (error) {
+    setNotice('error', error instanceof Error ? error.message : '订阅源删除失败。')
   }
 }
 
@@ -324,6 +461,45 @@ function handleExport() {
   setNotice('success', '已导出 JSON。')
 }
 
+function formatSourceStatus(source: ListenSource) {
+  if (source.lastStatus === 'success') {
+    return '正常'
+  }
+
+  if (source.lastStatus === 'empty') {
+    return '无条目'
+  }
+
+  if (source.lastStatus === 'syncing') {
+    return '同步中'
+  }
+
+  if (source.lastStatus === 'error') {
+    return '失败'
+  }
+
+  return '未同步'
+}
+
+function formatSourceTime(value: string) {
+  if (!value) {
+    return '从未'
+  }
+
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return '从未'
+  }
+
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 async function handleImport() {
   if (!importText.value.trim()) {
     setNotice('error', '请先粘贴 JSON。')
@@ -347,6 +523,10 @@ async function handleRefresh() {
 onMounted(async () => {
   document.addEventListener('pointerdown', handleDocumentPointerDown)
   authState.value = await validateSession() ? 'ready' : 'guest'
+
+  if (authState.value === 'ready') {
+    await refreshSources()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -574,6 +754,109 @@ onBeforeUnmount(() => {
             </button>
           </form>
 
+        </section>
+
+        <section class="listen-admin-panel">
+          <div class="panel-heading-row">
+            <div>
+              <p class="login-kicker">listen picker</p>
+              <h2>今天听什么订阅源</h2>
+            </div>
+            <button class="btn btn-muted" type="button" :disabled="listenBusy" @click="handleSyncAllSources">
+              {{ listenSyncState === 'syncing' ? '同步中' : '同步全部' }}
+            </button>
+          </div>
+
+          <form class="source-form" @submit.prevent="submitSourceForm">
+            <label class="field-group">
+              <span class="field-label">名称</span>
+              <input v-model.trim="sourceForm.title" class="field" type="text" placeholder="频道或声优名" required>
+            </label>
+
+            <label class="field-group source-url-field">
+              <span class="field-label">订阅地址</span>
+              <input
+                v-model.trim="sourceForm.feedUrl"
+                class="field"
+                type="text"
+                placeholder="YouTube 频道、官方 RSS、RSSHub 路径"
+                required
+              >
+            </label>
+
+            <label class="field-group">
+              <span class="field-label">平台</span>
+              <select v-model="sourceForm.platform" class="field">
+                <option v-for="option in sourcePlatformOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+
+            <label class="field-group">
+              <span class="field-label">标签</span>
+              <input v-model.trim="sourceForm.tagsText" class="field" type="text" placeholder="耳语，助眠">
+            </label>
+
+            <label class="field-group">
+              <span class="field-label">排序</span>
+              <input v-model.number="sourceForm.sortOrder" class="field" type="number" min="0" step="1">
+            </label>
+
+            <label class="source-enabled">
+              <input v-model="sourceForm.enabled" type="checkbox">
+              <span>启用</span>
+            </label>
+
+            <button class="btn btn-muted" type="button" :disabled="listenBusy" @click="handleTestSource">
+              测试
+            </button>
+            <button class="btn btn-primary" type="submit" :disabled="listenBusy">
+              {{ sourceEditingId ? '保存订阅源' : '+ 添加订阅源' }}
+            </button>
+            <button v-if="sourceEditingId" class="btn btn-muted" type="button" @click="resetSourceForm">
+              取消
+            </button>
+          </form>
+
+          <div v-if="sourceTestResult" class="source-test-result">
+            <strong>测试结果</strong>
+            <span>{{ sourceTestResult.count }} 条 · {{ sourceTestResult.sampleTitle }}</span>
+            <a :href="sourceTestResult.fetchUrl" target="_blank" rel="noreferrer">{{ sourceTestResult.fetchUrl }}</a>
+          </div>
+
+          <div class="source-list">
+            <div v-if="!listenSources.length" class="source-empty">
+              还没有订阅源。可以先粘贴 YouTube 频道地址或 RSSHub 路径。
+            </div>
+            <div v-for="source in listenSources" :key="source.id" class="source-row">
+              <div class="source-main">
+                <div class="source-title-line">
+                  <strong>{{ source.title }}</strong>
+                  <span class="source-platform">{{ source.platform }}</span>
+                  <span class="source-status" :class="{ 'is-error': source.lastStatus === 'error', 'is-ok': source.lastStatus === 'success' }">
+                    {{ formatSourceStatus(source) }}
+                  </span>
+                  <span v-if="!source.enabled" class="source-status">停用</span>
+                </div>
+                <a :href="source.feedUrl.startsWith('/') ? undefined : source.feedUrl" target="_blank" rel="noreferrer">
+                  {{ source.feedUrl }}
+                </a>
+                <p v-if="source.lastError" class="source-error">{{ source.lastError }}</p>
+                <p class="source-meta">
+                  {{ source.itemCount }} 条缓存 · 上次同步 {{ formatSourceTime(source.lastFetchedAt) }}
+                  <span v-if="source.tags.length"> · {{ source.tags.join(' / ') }}</span>
+                </p>
+              </div>
+              <div class="source-actions">
+                <button class="btn btn-muted btn-small" type="button" :disabled="listenBusy" @click="handleSyncSource(source)">
+                  同步
+                </button>
+                <button class="btn btn-muted btn-small" type="button" @click="fillSourceForm(source)">编辑</button>
+                <button class="btn btn-danger btn-small" type="button" @click="handleDeleteSource(source)">删除</button>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="admin-control-row">
