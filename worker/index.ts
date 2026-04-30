@@ -758,6 +758,45 @@ function normalizeItemUrl(raw: string) {
   }
 }
 
+function extractYouTubeVideoId(value: string) {
+  const raw = value.trim()
+
+  if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) {
+    return raw
+  }
+
+  try {
+    const url = new URL(raw)
+    const host = url.hostname.toLowerCase()
+    const pathParts = url.pathname.split('/').filter(Boolean)
+
+    if (host === 'youtu.be') {
+      return pathParts[0] ?? ''
+    }
+
+    if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') {
+      const watchId = url.searchParams.get('v') ?? ''
+
+      if (watchId) {
+        return watchId
+      }
+
+      if (['embed', 'shorts', 'live'].includes(pathParts[0] ?? '')) {
+        return pathParts[1] ?? ''
+      }
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
+function getYouTubeCoverFallback(url: string, guid: string) {
+  const videoId = extractYouTubeVideoId(url) || extractYouTubeVideoId(guid)
+  return videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : ''
+}
+
 function normalizeDate(raw: string) {
   const timestamp = Date.parse(raw)
   return Number.isNaN(timestamp) ? new Date().toISOString() : new Date(timestamp).toISOString()
@@ -1092,6 +1131,7 @@ function cleanParsedItem(item: ParsedFeedItem, source: ListenSource, fetchedAt: 
   const title = truncate(item.title, 160)
   const url = normalizeItemUrl(item.url)
   const guid = item.guid.trim() || url
+  const cover = normalizeItemUrl(item.cover) || getYouTubeCoverFallback(url, guid)
 
   if (!title || !url || !guid) {
     return null
@@ -1107,7 +1147,7 @@ function cleanParsedItem(item: ParsedFeedItem, source: ListenSource, fetchedAt: 
     platform: source.platform,
     publishedAt: normalizeDate(item.publishedAt),
     summary: truncate(item.summary, 240),
-    cover: normalizeItemUrl(item.cover),
+    cover,
     tags: source.tags,
     guid,
     fetchedAt,
