@@ -20,6 +20,7 @@ const listenItem = ref<ListenItem | null>(null)
 const listenLoading = ref(false)
 const listenError = ref('')
 const listenFlipped = ref(false)
+const listenExpanded = ref(false)
 const CLICK_STORAGE_KEY = 'asmr-nav.click-counts.v1'
 const COMMON_CATEGORY = '常用推荐'
 const COLLECTION_CATEGORY = '收藏'
@@ -145,6 +146,22 @@ const statusText = computed(() => {
   return backendReachable.value ? 'Online' : '本地'
 })
 
+const listenToggleSubtitle = computed(() => {
+  if (listenLoading.value) {
+    return '正在抽取...'
+  }
+
+  if (listenItem.value) {
+    return `已抽到：${listenItem.value.title}`
+  }
+
+  if (listenError.value) {
+    return listenError.value
+  }
+
+  return '翻一张声音卡'
+})
+
 watch(groupedLinks, (groups) => {
   if (userAdjustedExpansion.value || groups.length === 0) {
     return
@@ -173,6 +190,10 @@ function toggleCategory(category: string) {
   }
 
   expandedCategories.value = nextCategories
+}
+
+function toggleListenPicker() {
+  listenExpanded.value = !listenExpanded.value
 }
 
 function getClickCount(link: NavLink) {
@@ -366,16 +387,31 @@ onBeforeUnmount(() => {
       </form>
     </section>
 
-    <section class="listen-picker" aria-label="今天听什么">
-      <header class="listen-picker-header">
-        <div>
-          <h2>今天听什么呢？</h2>
-          <p>翻开一张声音卡</p>
-        </div>
-        <span class="listen-source-pill">RSSHub / YouTube</span>
-      </header>
+    <section class="listen-picker" :class="{ 'is-expanded': listenExpanded }" aria-label="今天听什么">
+      <button
+        class="listen-picker-toggle"
+        type="button"
+        :aria-expanded="listenExpanded"
+        aria-controls="listen-picker-panel"
+        @click="toggleListenPicker"
+      >
+        <span class="listen-toggle-copy">
+          <span class="listen-toggle-title">今天听什么呢？</span>
+          <span class="listen-toggle-subtitle">{{ listenToggleSubtitle }}</span>
+        </span>
+        <span class="listen-toggle-meta">
+          <span class="listen-source-pill">RSSHub / YouTube</span>
+          <span class="listen-toggle-icon" aria-hidden="true">⌄</span>
+        </span>
+      </button>
 
-      <div class="listen-flip" :class="{ 'is-flipped': listenFlipped }" :aria-busy="listenLoading">
+      <div
+        id="listen-picker-panel"
+        class="listen-panel"
+        :aria-hidden="!listenExpanded"
+        :inert="!listenExpanded"
+      >
+        <div class="listen-flip" :class="{ 'is-flipped': listenFlipped }" :aria-busy="listenLoading">
         <div class="listen-card-face listen-card-front">
           <div>
             <p class="listen-kicker">pick one</p>
@@ -425,6 +461,7 @@ onBeforeUnmount(() => {
             </button>
           </template>
         </div>
+      </div>
       </div>
     </section>
 
