@@ -447,9 +447,9 @@ a {
   background-repeat: no-repeat;
   background-position: center;
   background-size: cover;
-  filter: blur(18px) saturate(1.12);
-  opacity: 0.48;
-  transform: scale(1.12);
+  filter: blur(8px) saturate(1.08);
+  opacity: 0.46;
+  transform: scale(1.05);
 }
 
 .listen-card-back.has-cover::after {
