@@ -240,11 +240,7 @@ function handleSearch() {
   }
 
   const targetUrl = currentSearchEngine.value.buildUrl(query)
-  const opened = window.open(targetUrl, '_blank', 'noopener,noreferrer')
-
-  if (!opened) {
-    window.location.href = targetUrl
-  }
+  window.open(targetUrl, '_blank', 'noopener,noreferrer')
 }
 
 function wait(ms: number) {
@@ -304,11 +300,7 @@ function openListenItem() {
     return
   }
 
-  const opened = window.open(listenItem.value.url, '_blank', 'noopener,noreferrer')
-
-  if (!opened) {
-    window.location.href = listenItem.value.url
-  }
+  window.open(listenItem.value.url, '_blank', 'noopener,noreferrer')
 }
 
 onMounted(() => {
