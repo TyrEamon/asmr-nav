@@ -338,6 +338,10 @@ a {
   transform: rotateY(180deg);
 }
 
+.listen-card-back .listen-result-copy {
+  overflow: hidden;
+}
+
 .listen-kicker {
   margin-bottom: 8px;
   color: #a8bfff;
@@ -366,7 +370,7 @@ a {
   font-weight: 600;
   line-height: 1.42;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
 }
 
 .listen-meta,
@@ -377,11 +381,17 @@ a {
   font-size: 0.82rem;
 }
 
+.listen-tags {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .listen-summary {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 
 .listen-cover {
@@ -394,9 +404,11 @@ a {
 }
 
 .listen-actions {
+  margin-top: auto;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .listen-primary-action,
