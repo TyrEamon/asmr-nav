@@ -22,9 +22,6 @@
     "RSSHUB_BASE_URL": "https://rsshub-tan-nine.vercel.app",
     "FEED_SYNC_INTERVAL_MINUTES": "360"
   },
-  "triggers": {
-    "crons": ["0 */6 * * *"]
-  },
   "observability": {
     "enabled": true
   }
