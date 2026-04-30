@@ -849,6 +849,77 @@ function parseXmlFeed(xml: string, source: ListenSource): ParsedFeedItem[] {
   })
 }
 
+function isYouTubeUrl(value: string) {
+  try {
+    const host = new URL(value).hostname.toLowerCase()
+    return host === 'youtube.com'
+      || host === 'www.youtube.com'
+      || host === 'm.youtube.com'
+  } catch {
+    return false
+  }
+}
+
+function isYouTubeStreamsUrl(value: string) {
+  try {
+    const url = new URL(value)
+    return isYouTubeUrl(value) && url.pathname.split('/').filter(Boolean).includes('streams')
+  } catch {
+    return false
+  }
+}
+
+function extractYouTubeStreamsItems(html: string, source: ListenSource): ParsedFeedItem[] {
+  const seen = new Set<string>()
+  const items: ParsedFeedItem[] = []
+  const rendererPattern = /"(?:videoRenderer|gridVideoRenderer|richItemRenderer)"\s*:\s*({[\s\S]*?})(?=,\s*"(?:videoRenderer|gridVideoRenderer|richItemRenderer|continuationItemRenderer|playlistRenderer|reelItemRenderer)"|\]\s*[,}])/g
+  const fallbackPattern = /"videoId":"([a-zA-Z0-9_-]{11})"[\s\S]{0,2500}?"title":\{"runs":\[\{"text":"([^"]+)"/g
+
+  function addItem(videoId: string, title: string, thumbnail = '', publishedAt = '') {
+    if (!videoId || seen.has(videoId)) {
+      return
+    }
+
+    const cleanTitle = stripHtml(title)
+
+    if (!cleanTitle) {
+      return
+    }
+
+    seen.add(videoId)
+    items.push({
+      title: cleanTitle,
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      author: source.title,
+      publishedAt,
+      summary: '',
+      cover: thumbnail,
+      guid: videoId,
+    })
+  }
+
+  Array.from(html.matchAll(rendererPattern)).forEach((match) => {
+    const block = match[1]
+    const videoId = block.match(/"videoId":"([a-zA-Z0-9_-]{11})"/)?.[1] ?? ''
+    const title = block.match(/"title":\{"runs":\[\{"text":"([^"]+)"/)?.[1]
+      || block.match(/"title":\{"simpleText":"([^"]+)"/)?.[1]
+      || ''
+    const publishedAt = block.match(/"publishedTimeText":\{"simpleText":"([^"]+)"/)?.[1] ?? ''
+    const thumbnail = block.match(/"thumbnail":\{"thumbnails":\[\{"url":"([^"]+)"/)?.[1]
+      ?.replace(/\\u0026/g, '&') ?? ''
+
+    addItem(videoId, decodeEntities(title), normalizeItemUrl(thumbnail), publishedAt)
+  })
+
+  if (!items.length) {
+    Array.from(html.matchAll(fallbackPattern)).forEach((match) => {
+      addItem(match[1], decodeEntities(match[2]))
+    })
+  }
+
+  return items.slice(0, 50)
+}
+
 function parseFeedContent(content: string, contentType: string, source: ListenSource) {
   const text = content.trim()
 
@@ -974,6 +1045,30 @@ async function resolveFeedFetchUrl(env: Env, source: ListenSource) {
 }
 
 async function fetchListenSourceItems(env: Env, source: ListenSource) {
+  if (isYouTubeStreamsUrl(source.feedUrl)) {
+    const response = await fetch(source.feedUrl, {
+      headers: {
+        'accept': 'text/html',
+        'user-agent': 'Mozilla/5.0 ASMR-Nav/1.0',
+      },
+    })
+
+    if (!response.ok) {
+      throw new Error(`YouTube streams 页面请求失败：${response.status}`)
+    }
+
+    const content = await response.text()
+    const fetchedAt = new Date().toISOString()
+    const items = extractYouTubeStreamsItems(content, source)
+      .map((item) => cleanParsedItem(item, source, fetchedAt))
+      .filter(Boolean) as ListenItem[]
+
+    return {
+      fetchUrl: source.feedUrl,
+      items,
+    }
+  }
+
   const fetchUrl = await resolveFeedFetchUrl(env, source)
   const response = await fetch(fetchUrl, {
     headers: {
