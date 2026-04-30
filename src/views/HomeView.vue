@@ -303,6 +303,13 @@ function openListenItem() {
   window.open(listenItem.value.url, '_blank', 'noopener,noreferrer')
 }
 
+function getListenCoverStyle(cover: string) {
+  const escapedCover = cover.replace(/["\\\n\r\f]/g, '\\$&')
+  return {
+    '--listen-cover-image': `url("${escapedCover}")`,
+  }
+}
+
 onMounted(() => {
   loadClickCounts()
 
@@ -380,7 +387,11 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="listen-card-face listen-card-back">
+        <div
+          class="listen-card-face listen-card-back"
+          :class="{ 'has-cover': Boolean(listenItem?.cover) }"
+          :style="listenItem?.cover ? getListenCoverStyle(listenItem.cover) : undefined"
+        >
           <template v-if="listenItem">
             <div class="listen-result-main">
               <div class="listen-result-copy">

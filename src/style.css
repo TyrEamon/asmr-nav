@@ -342,6 +342,42 @@ a {
   transform: rotateY(180deg);
 }
 
+.listen-card-back.has-cover {
+  isolation: isolate;
+  background: #151515;
+}
+
+.listen-card-back.has-cover::before,
+.listen-card-back.has-cover::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+}
+
+.listen-card-back.has-cover::before {
+  z-index: 0;
+  background-image: var(--listen-cover-image);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+  filter: blur(18px) saturate(1.12);
+  opacity: 0.48;
+  transform: scale(1.12);
+}
+
+.listen-card-back.has-cover::after {
+  z-index: 1;
+  background:
+    linear-gradient(90deg, rgba(18, 18, 18, 0.88), rgba(18, 18, 18, 0.7) 52%, rgba(18, 18, 18, 0.82)),
+    radial-gradient(circle at top left, rgba(91, 123, 245, 0.24), transparent 38%);
+}
+
+.listen-card-back.has-cover > * {
+  position: relative;
+  z-index: 2;
+}
+
 .listen-card-back .listen-result-copy {
   min-height: 0;
   overflow: hidden;
