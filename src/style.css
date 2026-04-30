@@ -287,7 +287,7 @@ a {
 
 .listen-flip {
   position: relative;
-  min-height: 248px;
+  min-height: 286px;
   transform-style: preserve-3d;
   transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -335,10 +335,15 @@ a {
 }
 
 .listen-card-back {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-content: stretch;
+  gap: 14px;
   transform: rotateY(180deg);
 }
 
 .listen-card-back .listen-result-copy {
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -356,6 +361,8 @@ a {
   grid-template-columns: minmax(0, 1fr) 152px;
   gap: 16px;
   align-items: start;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .listen-result-copy {
@@ -381,6 +388,12 @@ a {
   font-size: 0.82rem;
 }
 
+.listen-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .listen-tags {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -404,11 +417,12 @@ a {
 }
 
 .listen-actions {
-  margin-top: auto;
+  margin-top: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   flex-shrink: 0;
+  align-self: end;
 }
 
 .listen-primary-action,
