@@ -76,6 +76,8 @@ interface ListenSourceRow {
   enabled: number
   sort_order: number
   last_fetched_at: string
+  last_fetch_url: string
+  next_cursor: string
   last_status: string
   last_error: string
   item_count: number | string | null
@@ -118,6 +120,19 @@ interface ParsedFeedItem {
   guid: string
 }
 
+interface ParsedFeedResult {
+  fetchUrl: string
+  items: ListenItem[]
+  nextCursor: string
+}
+
+interface YouTubeShell {
+  html: string
+  fetchUrl: string
+  apiKey: string
+  clientVersion: string
+}
+
 interface SessionPayload {
   iat: number
   exp: number
@@ -135,7 +150,7 @@ const SCHEMA_STATEMENTS = [
   "CREATE TABLE IF NOT EXISTS links (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
   'CREATE TABLE IF NOT EXISTS link_common (link_id TEXT PRIMARY KEY)',
   'CREATE TABLE IF NOT EXISTS category_meta (category TEXT PRIMARY KEY, sort_order INTEGER NOT NULL DEFAULT 100)',
-  "CREATE TABLE IF NOT EXISTS listen_sources (id TEXT PRIMARY KEY, title TEXT NOT NULL, feed_url TEXT NOT NULL, platform TEXT NOT NULL DEFAULT 'rss', tags TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 100, last_fetched_at TEXT NOT NULL DEFAULT '', last_status TEXT NOT NULL DEFAULT 'idle', last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS listen_sources (id TEXT PRIMARY KEY, title TEXT NOT NULL, feed_url TEXT NOT NULL, platform TEXT NOT NULL DEFAULT 'rss', tags TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 100, last_fetched_at TEXT NOT NULL DEFAULT '', last_fetch_url TEXT NOT NULL DEFAULT '', next_cursor TEXT NOT NULL DEFAULT '', last_status TEXT NOT NULL DEFAULT 'idle', last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS listen_items (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, author TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT 'rss', published_at TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]', guid TEXT NOT NULL, fetched_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(source_id, guid))",
   "INSERT OR IGNORE INTO link_common (link_id) SELECT id FROM links WHERE category = '常用推荐'",
   "UPDATE links SET category = '收藏' WHERE category = '常用推荐'",
@@ -146,6 +161,8 @@ const SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_listen_items_random ON listen_items(platform, published_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_listen_items_source ON listen_items(source_id, published_at DESC)',
 ]
+const LISTEN_PAGE_SIZE = 30
+const LISTEN_MAX_ITEMS_PER_SOURCE = 300
 
 let schemaReady: Promise<void> | null = null
 
@@ -333,6 +350,8 @@ function rowToListenSource(row: ListenSourceRow): ListenSource {
     enabled: Boolean(row.enabled),
     sortOrder: row.sort_order,
     lastFetchedAt: row.last_fetched_at,
+    lastFetchUrl: row.last_fetch_url,
+    nextCursor: row.next_cursor,
     lastStatus: row.last_status,
     lastError: row.last_error,
     itemCount: Number(row.item_count ?? 0),
@@ -554,6 +573,8 @@ async function listListenSources(env: Env) {
         listen_sources.enabled,
         listen_sources.sort_order,
         listen_sources.last_fetched_at,
+        listen_sources.last_fetch_url,
+        listen_sources.next_cursor,
         listen_sources.last_status,
         listen_sources.last_error,
         listen_sources.created_at,
@@ -581,6 +602,8 @@ async function readListenSource(env: Env, id: string) {
         listen_sources.enabled,
         listen_sources.sort_order,
         listen_sources.last_fetched_at,
+        listen_sources.last_fetch_url,
+        listen_sources.next_cursor,
         listen_sources.last_status,
         listen_sources.last_error,
         listen_sources.created_at,
@@ -603,6 +626,7 @@ async function writeListenSource(env: Env, input: ListenSourceInput, id?: string
   const now = new Date().toISOString()
   const sourceId = existing?.id ?? id ?? createId()
   const createdAt = existing?.createdAt ?? now
+  const feedChanged = existing ? existing.feedUrl !== input.feedUrl : false
 
   await env.ASMR_DB
     .prepare(`
@@ -615,12 +639,14 @@ async function writeListenSource(env: Env, input: ListenSourceInput, id?: string
         enabled,
         sort_order,
         last_fetched_at,
+        last_fetch_url,
+        next_cursor,
         last_status,
         last_error,
         created_at,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         feed_url = excluded.feed_url,
@@ -638,9 +664,11 @@ async function writeListenSource(env: Env, input: ListenSourceInput, id?: string
       JSON.stringify(input.tags),
       input.enabled ? 1 : 0,
       input.sortOrder,
-      existing?.lastFetchedAt ?? '',
-      existing?.lastStatus ?? 'idle',
-      existing?.lastError ?? '',
+      feedChanged ? '' : existing?.lastFetchedAt ?? '',
+      feedChanged ? '' : existing?.lastFetchUrl ?? '',
+      feedChanged ? '' : existing?.nextCursor ?? '',
+      feedChanged ? 'idle' : existing?.lastStatus ?? 'idle',
+      feedChanged ? '' : existing?.lastError ?? '',
       createdAt,
       now,
     )
@@ -869,6 +897,61 @@ function isYouTubeStreamsUrl(value: string) {
   }
 }
 
+function getYouTubeStreamsUrl(source: ListenSource) {
+  const feedUrl = source.feedUrl.trim()
+
+  if (isYouTubeStreamsUrl(feedUrl)) {
+    return feedUrl
+  }
+
+  const rsshubChannelMatch = feedUrl.match(/\/youtube\/channel\/(UC[a-zA-Z0-9_-]+)/)
+
+  if (rsshubChannelMatch) {
+    return `https://www.youtube.com/channel/${rsshubChannelMatch[1]}/streams`
+  }
+
+  if (isYouTubeUrl(feedUrl)) {
+    const url = new URL(feedUrl)
+    const parts = url.pathname.split('/').filter(Boolean)
+
+    if (parts[0] === 'channel' && parts[1]?.startsWith('UC')) {
+      return `https://www.youtube.com/channel/${parts[1]}/streams`
+    }
+
+    if (parts[0]?.startsWith('@')) {
+      return `https://www.youtube.com/${parts[0]}/streams`
+    }
+  }
+
+  return ''
+}
+
+function extractYouTubeContinuationTokens(content: string) {
+  const preferred = Array.from(
+    content.matchAll(/"continuationItemRenderer":\{[\s\S]*?"continuationCommand":\{"token":"([^"]+)"/g),
+    (match) => decodeURIComponent(match[1]),
+  )
+  const fallback = Array.from(
+    content.matchAll(/"continuationCommand":\{"token":"([^"]+)"/g),
+    (match) => decodeURIComponent(match[1]),
+  )
+
+  return Array.from(new Set((preferred.length ? preferred : fallback).filter(Boolean)))
+}
+
+function extractYouTubeShell(html: string, fetchUrl: string): YouTubeShell {
+  const apiKey = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1] ?? ''
+  const clientVersion = html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/)?.[1]
+    || html.match(/"clientVersion":"([^"]+)"/)?.[1]
+    || ''
+
+  if (!apiKey || !clientVersion) {
+    throw new Error('没有解析到 YouTube 翻页参数。')
+  }
+
+  return { html, fetchUrl, apiKey, clientVersion }
+}
+
 function extractYouTubeStreamsItems(html: string, source: ListenSource): ParsedFeedItem[] {
   const seen = new Set<string>()
   const items: ParsedFeedItem[] = []
@@ -917,7 +1000,72 @@ function extractYouTubeStreamsItems(html: string, source: ListenSource): ParsedF
     })
   }
 
-  return items.slice(0, 50)
+  return items.slice(0, LISTEN_PAGE_SIZE)
+}
+
+async function fetchYouTubeStreamsShell(streamsUrl: string): Promise<YouTubeShell> {
+  const response = await fetch(streamsUrl, {
+    headers: {
+      'accept': 'text/html',
+      'user-agent': 'Mozilla/5.0 ASMR-Nav/1.0',
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`YouTube streams 页面请求失败：${response.status}`)
+  }
+
+  return extractYouTubeShell(await response.text(), streamsUrl)
+}
+
+async function fetchYouTubeContinuation(shell: YouTubeShell, cursor: string) {
+  const response = await fetch(`https://www.youtube.com/youtubei/v1/browse?key=${shell.apiKey}&prettyPrint=false`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'user-agent': 'Mozilla/5.0 ASMR-Nav/1.0',
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: 'WEB',
+          clientVersion: shell.clientVersion,
+        },
+      },
+      continuation: cursor,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`YouTube 翻页请求失败：${response.status}`)
+  }
+
+  return response.text()
+}
+
+async function fetchYouTubeStreamsItems(source: ListenSource, mode: 'latest' | 'more'): Promise<ParsedFeedResult> {
+  const streamsUrl = getYouTubeStreamsUrl(source)
+
+  if (!streamsUrl) {
+    throw new Error('这个订阅源不支持补旧。请使用 YouTube streams 地址或 /youtube/channel/频道ID。')
+  }
+
+  const shell = await fetchYouTubeStreamsShell(streamsUrl)
+  const firstCursor = source.nextCursor || extractYouTubeContinuationTokens(shell.html)[0] || ''
+  const pageContent = mode === 'more' && firstCursor
+    ? await fetchYouTubeContinuation(shell, firstCursor)
+    : shell.html
+  const nextCursor = extractYouTubeContinuationTokens(pageContent)[0] || ''
+  const fetchedAt = new Date().toISOString()
+  const items = extractYouTubeStreamsItems(pageContent, source)
+    .map((item) => cleanParsedItem(item, source, fetchedAt))
+    .filter(Boolean) as ListenItem[]
+
+  return {
+    fetchUrl: mode === 'more' && firstCursor ? `${streamsUrl}#more` : streamsUrl,
+    items,
+    nextCursor,
+  }
 }
 
 function parseFeedContent(content: string, contentType: string, source: ListenSource) {
@@ -1044,29 +1192,13 @@ async function resolveFeedFetchUrl(env: Env, source: ListenSource) {
   return withRsshubJsonFormat(source, url.toString())
 }
 
-async function fetchListenSourceItems(env: Env, source: ListenSource) {
+async function fetchListenSourceItems(env: Env, source: ListenSource, mode: 'latest' | 'more' = 'latest'): Promise<ParsedFeedResult> {
+  if (mode === 'more') {
+    return fetchYouTubeStreamsItems(source, 'more')
+  }
+
   if (isYouTubeStreamsUrl(source.feedUrl)) {
-    const response = await fetch(source.feedUrl, {
-      headers: {
-        'accept': 'text/html',
-        'user-agent': 'Mozilla/5.0 ASMR-Nav/1.0',
-      },
-    })
-
-    if (!response.ok) {
-      throw new Error(`YouTube streams 页面请求失败：${response.status}`)
-    }
-
-    const content = await response.text()
-    const fetchedAt = new Date().toISOString()
-    const items = extractYouTubeStreamsItems(content, source)
-      .map((item) => cleanParsedItem(item, source, fetchedAt))
-      .filter(Boolean) as ListenItem[]
-
-    return {
-      fetchUrl: source.feedUrl,
-      items,
-    }
+    return fetchYouTubeStreamsItems(source, 'latest')
   }
 
   const fetchUrl = await resolveFeedFetchUrl(env, source)
@@ -1091,6 +1223,7 @@ async function fetchListenSourceItems(env: Env, source: ListenSource) {
   return {
     fetchUrl,
     items,
+    nextCursor: '',
   }
 }
 
@@ -1105,7 +1238,7 @@ async function updateListenSourceStatus(env: Env, id: string, status: string, er
     .run()
 }
 
-async function syncListenSource(env: Env, id: string) {
+async function syncListenSource(env: Env, id: string, mode: 'latest' | 'more' = 'latest') {
   const source = await readListenSource(env, id)
 
   if (!source) {
@@ -1115,10 +1248,10 @@ async function syncListenSource(env: Env, id: string) {
   await updateListenSourceStatus(env, id, 'syncing')
 
   try {
-    const { fetchUrl, items } = await fetchListenSourceItems(env, source)
+    const { fetchUrl, items, nextCursor } = await fetchListenSourceItems(env, source, mode)
     const now = new Date().toISOString()
 
-    for (const item of items.slice(0, 50)) {
+    for (const item of items.slice(0, LISTEN_PAGE_SIZE)) {
       await env.ASMR_DB
         .prepare(`
           INSERT INTO listen_items (
@@ -1178,7 +1311,7 @@ async function syncListenSource(env: Env, id: string) {
             FROM listen_items
             WHERE source_id = ?
             ORDER BY published_at DESC, fetched_at DESC
-            LIMIT 50
+            LIMIT ${LISTEN_MAX_ITEMS_PER_SOURCE}
           )
       `)
       .bind(source.id, source.id)
@@ -1187,16 +1320,17 @@ async function syncListenSource(env: Env, id: string) {
     await env.ASMR_DB
       .prepare(`
         UPDATE listen_sources
-        SET last_fetched_at = ?, last_status = ?, last_error = '', updated_at = ?
+        SET last_fetched_at = ?, last_fetch_url = ?, next_cursor = ?, last_status = ?, last_error = '', updated_at = ?
         WHERE id = ?
       `)
-      .bind(now, items.length ? 'success' : 'empty', now, id)
+      .bind(now, fetchUrl, nextCursor, items.length ? 'success' : 'empty', now, id)
       .run()
 
     return {
       source: await readListenSource(env, id),
       imported: items.length,
       fetchUrl,
+      hasMore: Boolean(nextCursor),
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : '同步失败。'
@@ -1221,6 +1355,8 @@ async function syncDueListenSources(env: Env, force = false) {
         listen_sources.enabled,
         listen_sources.sort_order,
         listen_sources.last_fetched_at,
+        listen_sources.last_fetch_url,
+        listen_sources.next_cursor,
         listen_sources.last_status,
         listen_sources.last_error,
         listen_sources.created_at,
@@ -1703,6 +1839,8 @@ async function handleApi(request: Request, env: Env) {
       enabled: payload.enabled,
       sortOrder: payload.sortOrder,
       lastFetchedAt: '',
+      lastFetchUrl: '',
+      nextCursor: '',
       lastStatus: 'testing',
       lastError: '',
       itemCount: 0,
@@ -1746,6 +1884,16 @@ async function handleApi(request: Request, env: Env) {
       }
 
       return json(await syncListenSource(env, id))
+    }
+
+    if (request.method === 'POST' && action === 'more') {
+      const authError = await requireAdmin(request, env)
+
+      if (authError) {
+        return authError
+      }
+
+      return json(await syncListenSource(env, id, 'more'))
     }
 
     if (request.method === 'PUT' && !action) {

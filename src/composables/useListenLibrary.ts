@@ -152,6 +152,22 @@ async function syncSource(id: string) {
   }
 }
 
+async function loadMoreSource(id: string) {
+  syncState.value = 'syncing'
+
+  try {
+    const payload = await requestJson<{ imported: number; source: ListenSource | null; hasMore: boolean }>(
+      `/api/listen/sources/${id}/more`,
+      { method: 'POST' },
+      { auth: true },
+    )
+    await refreshSources()
+    return payload
+  } finally {
+    syncState.value = 'idle'
+  }
+}
+
 async function syncAllSources() {
   syncState.value = 'syncing'
 
@@ -202,6 +218,7 @@ export function useListenLibrary() {
     deleteSource,
     testSource,
     syncSource,
+    loadMoreSource,
     syncAllSources,
     getRandomItem,
   }

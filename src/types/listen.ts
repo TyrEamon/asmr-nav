@@ -9,6 +9,8 @@ export interface ListenSource {
   enabled: boolean
   sortOrder: number
   lastFetchedAt: string
+  lastFetchUrl: string
+  nextCursor: string
   lastStatus: string
   lastError: string
   itemCount: number
@@ -18,7 +20,7 @@ export interface ListenSource {
 
 export type ListenSourceMutation = Omit<
   ListenSource,
-  'id' | 'lastFetchedAt' | 'lastStatus' | 'lastError' | 'itemCount' | 'createdAt' | 'updatedAt'
+  'id' | 'lastFetchedAt' | 'lastFetchUrl' | 'nextCursor' | 'lastStatus' | 'lastError' | 'itemCount' | 'createdAt' | 'updatedAt'
 > & {
   id?: string
 }
