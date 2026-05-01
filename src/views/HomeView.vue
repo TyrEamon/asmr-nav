@@ -66,9 +66,9 @@ const searchEngines = [
 ]
 
 const listenPlatformFilters: { value: ListenPlatform | 'all'; label: string }[] = [
-  { value: 'all', label: 'All' },
+  { value: 'all', label: 'ALL' },
   { value: 'youtube', label: 'YouTube' },
-  { value: 'asmrone', label: 'ASMR.one' },
+  { value: 'asmrone', label: 'ASMRone' },
 ]
 
 let timer: ReturnType<typeof setInterval> | null = null
@@ -169,6 +169,11 @@ const listenToggleSubtitle = computed(() => {
   return '翻一张声音卡'
 })
 
+const selectedListenPlatformIndex = computed(() => {
+  const index = listenPlatformFilters.findIndex((filter) => filter.value === selectedListenPlatform.value)
+  return index === -1 ? 0 : index
+})
+
 watch(groupedLinks, (groups) => {
   if (userAdjustedExpansion.value || groups.length === 0) {
     return
@@ -197,6 +202,53 @@ function toggleCategory(category: string) {
   }
 
   expandedCategories.value = nextCategories
+}
+
+function beforeCategoryEnter(element: Element) {
+  const category = element as HTMLElement
+
+  category.style.height = '0px'
+  category.style.opacity = '0'
+  category.style.overflow = 'hidden'
+  category.style.transform = 'translateY(-8px)'
+}
+
+function enterCategory(element: Element) {
+  const category = element as HTMLElement
+
+  requestAnimationFrame(() => {
+    category.style.height = `${category.scrollHeight}px`
+    category.style.opacity = '1'
+    category.style.transform = 'translateY(0)'
+  })
+}
+
+function afterCategoryTransition(element: Element) {
+  const category = element as HTMLElement
+
+  category.style.height = ''
+  category.style.opacity = ''
+  category.style.overflow = ''
+  category.style.transform = ''
+}
+
+function beforeCategoryLeave(element: Element) {
+  const category = element as HTMLElement
+
+  category.style.height = `${category.scrollHeight}px`
+  category.style.opacity = '1'
+  category.style.overflow = 'hidden'
+  category.style.transform = 'translateY(0)'
+}
+
+function leaveCategory(element: Element) {
+  const category = element as HTMLElement
+
+  requestAnimationFrame(() => {
+    category.style.height = '0px'
+    category.style.opacity = '0'
+    category.style.transform = 'translateY(-6px)'
+  })
 }
 
 function toggleListenPicker() {
@@ -415,7 +467,13 @@ onBeforeUnmount(() => {
           <span class="listen-toggle-subtitle">{{ listenToggleSubtitle }}</span>
         </span>
         <span class="listen-toggle-meta">
-          <span class="listen-platform-tabs" aria-label="选择抽取来源" @click.stop>
+          <span
+            class="listen-platform-tabs"
+            aria-label="选择抽取来源"
+            :style="{ '--active-index': selectedListenPlatformIndex }"
+            @click.stop
+          >
+            <span class="listen-platform-indicator" aria-hidden="true"></span>
             <span
               v-for="filter in listenPlatformFilters"
               :key="filter.value"
@@ -425,13 +483,19 @@ onBeforeUnmount(() => {
               :class="{ 'is-active': selectedListenPlatform === filter.value }"
               :aria-pressed="selectedListenPlatform === filter.value"
               @click="selectListenPlatform(filter.value)"
-              @keydown.enter.prevent="selectListenPlatform(filter.value)"
-              @keydown.space.prevent="selectListenPlatform(filter.value)"
+              @keydown.enter.stop.prevent="selectListenPlatform(filter.value)"
+              @keydown.space.stop.prevent="selectListenPlatform(filter.value)"
             >
               {{ filter.label }}
             </span>
           </span>
-          <span class="listen-toggle-icon" aria-hidden="true">⌄</span>
+          <span class="listen-toggle-icon" aria-hidden="true">
+            <svg class="listen-toggle-svg" viewBox="0 0 24 24" focusable="false">
+              <path d="M7 9.5 12 14l5-4.5" />
+              <path d="M8.8 5.8 12 8.7l3.2-2.9" />
+              <path d="M8.8 18.2 12 15.3l3.2 2.9" />
+            </svg>
+          </span>
         </span>
       </button>
 
@@ -507,14 +571,26 @@ onBeforeUnmount(() => {
       >
         {{ group.category }}
       </h2>
-      <div v-if="isCategoryExpanded(group.category)" class="nav-grid">
-        <NavCard
-          v-for="link in group.items"
-          :key="trackById(link)"
-          :link="link"
-          @open="recordLinkClick"
-        />
-      </div>
+      <Transition
+        name="category-reveal"
+        @before-enter="beforeCategoryEnter"
+        @enter="enterCategory"
+        @after-enter="afterCategoryTransition"
+        @before-leave="beforeCategoryLeave"
+        @leave="leaveCategory"
+        @after-leave="afterCategoryTransition"
+      >
+        <div v-if="isCategoryExpanded(group.category)" class="category-reveal">
+          <div class="nav-grid">
+            <NavCard
+              v-for="link in group.items"
+              :key="trackById(link)"
+              :link="link"
+              @open="recordLinkClick"
+            />
+          </div>
+        </div>
+      </Transition>
     </section>
   </main>
 </template>

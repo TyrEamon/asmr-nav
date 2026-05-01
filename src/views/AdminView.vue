@@ -415,11 +415,51 @@ async function handleSyncSource(source: ListenSource) {
   }
 }
 
-async function handleLoadMoreSource(source: ListenSource) {
+function isAsmrOneSource(source: ListenSource) {
+  if (source.platform === 'asmrone') {
+    return true
+  }
+
   try {
-    setNotice('success', `正在补旧：${source.title}`)
+    const url = source.feedUrl.startsWith('/')
+      ? new URL(source.feedUrl, 'https://www.asmr.one')
+      : new URL(source.feedUrl)
+    const host = url.hostname.toLowerCase()
+
+    return host === 'asmr.one' || host === 'www.asmr.one' || host.startsWith('api.asmr-')
+  } catch {
+    return false
+  }
+}
+
+function getAsmrOneMorePage(source: ListenSource) {
+  const page = Number.parseInt(source.nextCursor || '', 10)
+  return Number.isFinite(page) && page > 0 ? page : 2
+}
+
+function isLoadMoreDisabled(source: ListenSource) {
+  return isAsmrOneSource(source) && Boolean(source.lastFetchedAt) && !source.nextCursor
+}
+
+function getLoadMoreLabel(source: ListenSource) {
+  if (listenBusy.value) {
+    return '处理中'
+  }
+
+  if (isLoadMoreDisabled(source)) {
+    return '已补完'
+  }
+
+  return isAsmrOneSource(source) ? `补第 ${getAsmrOneMorePage(source)} 页` : '补旧30'
+}
+
+async function handleLoadMoreSource(source: ListenSource) {
+  const moreLabel = isAsmrOneSource(source) ? `第 ${getAsmrOneMorePage(source)} 页` : '旧内容'
+
+  try {
+    setNotice('success', `正在补${moreLabel}：${source.title}`)
     const result = await loadMoreSource(source.id)
-    setNotice('success', `补旧完成：${source.title}，导入 ${result.imported} 条。`)
+    setNotice('success', `补${moreLabel}完成：${source.title}，导入 ${result.imported} 条。`)
   } catch (error) {
     setNotice('error', error instanceof Error ? error.message : '补旧失败。')
   }
@@ -792,7 +832,7 @@ onBeforeUnmount(() => {
                 v-model.trim="sourceForm.feedUrl"
                 class="field"
                 type="text"
-                placeholder="YouTube 频道、官方 RSS、RSSHub 路径"
+                placeholder="YouTube 频道、官方 RSS、RSSHub 路径、ASMR.one 搜索页"
                 required
               >
             </label>
@@ -865,8 +905,8 @@ onBeforeUnmount(() => {
                 <button class="btn btn-muted btn-small" type="button" :disabled="listenBusy" @click="handleSyncSource(source)">
                   {{ listenBusy ? '处理中' : '同步' }}
                 </button>
-                <button class="btn btn-muted btn-small" type="button" :disabled="listenBusy" @click="handleLoadMoreSource(source)">
-                  {{ listenBusy ? '处理中' : '补旧30' }}
+                <button class="btn btn-muted btn-small" type="button" :disabled="listenBusy || isLoadMoreDisabled(source)" @click="handleLoadMoreSource(source)">
+                  {{ getLoadMoreLabel(source) }}
                 </button>
                 <button class="btn btn-muted btn-small" type="button" @click="fillSourceForm(source)">编辑</button>
                 <button class="btn btn-danger btn-small" type="button" @click="handleDeleteSource(source)">删除</button>

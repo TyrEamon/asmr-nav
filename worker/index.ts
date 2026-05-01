@@ -1393,13 +1393,62 @@ function getAsmrOneApiBases(env: Env) {
   ].filter((base, index, bases) => bases.indexOf(base) === index)
 }
 
-function getAsmrOnePage(source: ListenSource, mode: 'latest' | 'more') {
-  if (mode === 'latest') {
+function getAsmrOneInitialPage(source: ListenSource) {
+  try {
+    const feedUrl = source.feedUrl.trim()
+    const url = feedUrl.startsWith('/')
+      ? new URL(feedUrl, 'https://www.asmr.one')
+      : new URL(feedUrl)
+    const page = Number.parseInt(url.searchParams.get('page') ?? '', 10)
+
+    return Number.isFinite(page) && page > 0 ? page : 1
+  } catch {
     return 1
   }
+}
 
-  const page = Number.parseInt(source.nextCursor || '2', 10)
-  return Number.isFinite(page) && page > 1 ? page : 2
+function parsePositivePage(value: string) {
+  const page = Number.parseInt(value, 10)
+  return Number.isFinite(page) && page > 0 ? page : 0
+}
+
+function getAsmrOnePage(source: ListenSource, mode: 'latest' | 'more') {
+  const initialPage = getAsmrOneInitialPage(source)
+
+  if (mode === 'latest') {
+    return initialPage
+  }
+
+  const fallbackPage = initialPage > 1 ? initialPage : 2
+  const page = Number.parseInt(source.nextCursor || String(fallbackPage), 10)
+  return Number.isFinite(page) && page > 0 ? page : fallbackPage
+}
+
+function resolveListenNextCursor(source: ListenSource, mode: 'latest' | 'more', nextCursor: string) {
+  if (source.platform !== 'asmrone' && !isAsmrOneUrl(source.feedUrl)) {
+    return nextCursor
+  }
+
+  if (mode !== 'latest') {
+    return nextCursor
+  }
+
+  if (!source.lastFetchedAt) {
+    return nextCursor
+  }
+
+  if (!source.nextCursor) {
+    return ''
+  }
+
+  const existingPage = parsePositivePage(source.nextCursor)
+  const fetchedPage = parsePositivePage(nextCursor)
+
+  if (!fetchedPage) {
+    return source.nextCursor
+  }
+
+  return String(Math.max(existingPage, fetchedPage))
 }
 
 function buildAsmrOnePath(source: ListenSource, page: number) {
@@ -1648,6 +1697,7 @@ async function syncListenSource(env: Env, id: string, mode: 'latest' | 'more' = 
 
   try {
     const { fetchUrl, items, nextCursor } = await fetchListenSourceItems(env, source, mode)
+    const resolvedNextCursor = resolveListenNextCursor(source, mode, nextCursor)
     const now = new Date().toISOString()
 
     for (const item of items.slice(0, LISTEN_PAGE_SIZE)) {
@@ -1722,14 +1772,14 @@ async function syncListenSource(env: Env, id: string, mode: 'latest' | 'more' = 
         SET last_fetched_at = ?, last_fetch_url = ?, next_cursor = ?, last_status = ?, last_error = '', updated_at = ?
         WHERE id = ?
       `)
-      .bind(now, fetchUrl, nextCursor, items.length ? 'success' : 'empty', now, id)
+      .bind(now, fetchUrl, resolvedNextCursor, items.length ? 'success' : 'empty', now, id)
       .run()
 
     return {
       source: await readListenSource(env, id),
       imported: items.length,
       fetchUrl,
-      hasMore: Boolean(nextCursor),
+      hasMore: Boolean(resolvedNextCursor),
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : '同步失败。'
