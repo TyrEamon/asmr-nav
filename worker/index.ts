@@ -208,6 +208,16 @@ function normalizePlatform(value: string): ListenPlatform {
   return 'other'
 }
 
+function normalizePlatformFilter(value: string) {
+  const platform = value.trim().toLowerCase()
+
+  if (!platform || platform === 'all') {
+    return ''
+  }
+
+  return normalizePlatform(platform)
+}
+
 function normalizeTags(raw: unknown): string[] {
   const values = Array.isArray(raw)
     ? raw
@@ -1839,7 +1849,7 @@ async function syncDueListenSources(env: Env, force = false) {
 }
 
 async function pickRandomListenItem(env: Env, url: URL) {
-  const platform = normalizePlatform(url.searchParams.get('platform') ?? '')
+  const platform = normalizePlatformFilter(url.searchParams.get('platform') ?? '')
   const sourceId = url.searchParams.get('sourceId')?.trim() ?? ''
   const tag = url.searchParams.get('tag')?.trim() ?? ''
   const requestedFreshDays = Number.parseInt(url.searchParams.get('freshDays') ?? '90', 10)
