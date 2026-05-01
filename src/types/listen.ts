@@ -1,4 +1,4 @@
-export type ListenPlatform = 'youtube' | 'rsshub' | 'rss' | 'other'
+export type ListenPlatform = 'youtube' | 'rsshub' | 'asmrone' | 'rss' | 'other'
 
 export interface ListenSource {
   id: string

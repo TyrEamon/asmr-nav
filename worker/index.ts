@@ -27,6 +27,7 @@ interface Env {
   SESSION_TTL_SECONDS?: string
   AUTO_SEED_DEFAULTS?: string
   RSSHUB_BASE_URL?: string
+  ASMRONE_API_BASE_URLS?: string
   FEED_SYNC_INTERVAL_MINUTES?: string
 }
 
@@ -163,6 +164,12 @@ const SCHEMA_STATEMENTS = [
 ]
 const LISTEN_PAGE_SIZE = 30
 const LISTEN_MAX_ITEMS_PER_SOURCE = 300
+const ASMRONE_API_BASE_URLS = [
+  'https://api.asmr-200.com',
+  'https://api.asmr-300.com',
+  'https://api.asmr.one',
+  'https://api.asmr-100.com',
+]
 
 let schemaReady: Promise<void> | null = null
 
@@ -194,7 +201,7 @@ function normalizeUrl(raw: string) {
 function normalizePlatform(value: string): ListenPlatform {
   const platform = value.trim().toLowerCase()
 
-  if (platform === 'youtube' || platform === 'rsshub' || platform === 'rss') {
+  if (platform === 'youtube' || platform === 'rsshub' || platform === 'asmrone' || platform === 'rss') {
     return platform
   }
 
@@ -1367,6 +1374,158 @@ function withRsshubJsonFormat(source: ListenSource, value: string) {
   return url.toString()
 }
 
+function isAsmrOneUrl(value: string) {
+  try {
+    const host = new URL(value).hostname.toLowerCase()
+    return host === 'asmr.one' || host === 'www.asmr.one' || host.startsWith('api.asmr-')
+  } catch {
+    return false
+  }
+}
+
+function getAsmrOneApiBases(env: Env) {
+  return [
+    ...(env.ASMRONE_API_BASE_URLS ?? '')
+      .split(',')
+      .map((base) => base.trim().replace(/\/$/, ''))
+      .filter(Boolean),
+    ...ASMRONE_API_BASE_URLS,
+  ].filter((base, index, bases) => bases.indexOf(base) === index)
+}
+
+function getAsmrOnePage(source: ListenSource, mode: 'latest' | 'more') {
+  if (mode === 'latest') {
+    return 1
+  }
+
+  const page = Number.parseInt(source.nextCursor || '2', 10)
+  return Number.isFinite(page) && page > 1 ? page : 2
+}
+
+function buildAsmrOnePath(source: ListenSource, page: number) {
+  const feedUrl = source.feedUrl.trim()
+  const url = feedUrl.startsWith('/')
+    ? new URL(feedUrl, 'https://www.asmr.one')
+    : new URL(feedUrl)
+  const params = new URLSearchParams()
+
+  params.set('order', url.searchParams.get('order') || 'create_date')
+  params.set('sort', url.searchParams.get('sort') || 'desc')
+  params.set('page', String(page))
+  params.set('pageSize', String(LISTEN_PAGE_SIZE))
+
+  const keyword = url.searchParams.get('keyword')?.trim() ?? ''
+
+  if (keyword) {
+    return `/api/search/${encodeURIComponent(keyword)}?${params.toString()}`
+  }
+
+  return `/api/works?${params.toString()}`
+}
+
+async function fetchAsmrOneJson(env: Env, path: string) {
+  let lastError = ''
+
+  for (const base of getAsmrOneApiBases(env)) {
+    const fetchUrl = `${base}${path}`
+
+    try {
+      const response = await fetch(fetchUrl, {
+        headers: {
+          'accept': 'application/json',
+          'user-agent': 'ASMR-Nav/1.0 (+https://asmr-nav)',
+        },
+      })
+
+      if (!response.ok) {
+        lastError = `ASMR.one 请求失败：${response.status}`
+        continue
+      }
+
+      return {
+        fetchUrl,
+        payload: await response.json() as Record<string, unknown>,
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : 'ASMR.one 请求失败。'
+    }
+  }
+
+  throw new Error(lastError || 'ASMR.one API 不可用。')
+}
+
+function formatAsmrOneId(raw: unknown) {
+  const id = String(raw ?? '').replace(/\D/g, '')
+  return id ? `RJ${id.padStart(8, '0')}` : ''
+}
+
+function extractAsmrOneNames(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((item) => getRecord(item)?.name)
+    .filter((name): name is string => typeof name === 'string' && Boolean(name.trim()))
+}
+
+function parseAsmrOneWorks(payload: Record<string, unknown>, source: ListenSource, fetchedAt: string): ListenItem[] {
+  const works = Array.isArray(payload.works) ? payload.works : []
+
+  return works
+    .map((work) => {
+      const record = getRecord(work)
+
+      if (!record) {
+        return null
+      }
+
+      const id = String(record.id ?? '').trim()
+      const rj = formatAsmrOneId(record.id)
+      const title = extractJsonString(record.title)
+      const author = extractJsonString(record.name) || source.title
+      const vas = extractAsmrOneNames(record.vas)
+      const tags = extractAsmrOneNames(record.tags).slice(0, 6)
+      const release = extractJsonString(record.release)
+      const created = extractJsonString(record.create_date)
+      const summaryParts = [
+        rj,
+        author,
+        vas.length ? `声优：${vas.join(' / ')}` : '',
+        tags.length ? tags.join(' / ') : '',
+      ].filter(Boolean)
+
+      return cleanParsedItem({
+        title,
+        url: rj ? `https://www.asmr.one/work/${rj}` : `https://www.asmr.one/work/${id}`,
+        author,
+        publishedAt: created || release,
+        summary: summaryParts.join(' · '),
+        cover: id ? `https://api.asmr-200.com/api/cover/${id}.jpg?type=main` : '',
+        guid: rj || id,
+      }, source, fetchedAt)
+    })
+    .filter(Boolean) as ListenItem[]
+}
+
+async function fetchAsmrOneItems(env: Env, source: ListenSource, mode: 'latest' | 'more'): Promise<ParsedFeedResult> {
+  const page = getAsmrOnePage(source, mode)
+  const path = buildAsmrOnePath(source, page)
+  const { fetchUrl, payload } = await fetchAsmrOneJson(env, path)
+  const fetchedAt = new Date().toISOString()
+  const items = parseAsmrOneWorks(payload, source, fetchedAt)
+  const pagination = getRecord(payload.pagination)
+  const totalCount = Number(pagination?.totalCount ?? 0)
+  const pageSize = Number(pagination?.pageSize ?? LISTEN_PAGE_SIZE) || LISTEN_PAGE_SIZE
+  const hasMore = totalCount > page * pageSize || items.length >= pageSize
+
+  return {
+    fetchUrl,
+    items,
+    nextCursor: hasMore ? String(page + 1) : '',
+  }
+}
+
 async function resolveYouTubeFeedUrl(value: string) {
   const url = new URL(value)
   const pathParts = url.pathname.split('/').filter(Boolean)
@@ -1429,6 +1588,10 @@ async function resolveFeedFetchUrl(env: Env, source: ListenSource) {
 }
 
 async function fetchListenSourceItems(env: Env, source: ListenSource, mode: 'latest' | 'more' = 'latest'): Promise<ParsedFeedResult> {
+  if (source.platform === 'asmrone' || isAsmrOneUrl(source.feedUrl)) {
+    return fetchAsmrOneItems(env, source, mode)
+  }
+
   if (mode === 'more') {
     return fetchYouTubeTabItems(source, 'more')
   }
@@ -1652,7 +1815,7 @@ async function pickRandomListenItem(env: Env, url: URL) {
       FROM listen_items
       JOIN listen_sources ON listen_sources.id = listen_items.source_id
       WHERE listen_sources.enabled = 1
-        AND (? = 'other' OR listen_items.platform = ?)
+        AND (? = '' OR listen_items.platform = ?)
         AND (? = '' OR listen_items.source_id = ?)
         AND (? = '' OR listen_items.tags LIKE ?)
         AND (? = 0 OR listen_items.published_at >= ?)

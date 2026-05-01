@@ -350,6 +350,51 @@ a {
   white-space: nowrap;
 }
 
+.listen-platform-tabs {
+  display: flex;
+  gap: 8px;
+  max-width: min(340px, 42vw);
+  overflow-x: auto;
+  padding: 2px 2px 4px;
+  scrollbar-width: none;
+}
+
+.listen-platform-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.listen-platform-tab {
+  min-height: 36px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+  padding: 0 14px;
+  white-space: nowrap;
+  transition: background-color 0.22s ease, border-color 0.22s ease, color 0.22s ease, transform 0.22s ease;
+}
+
+.listen-platform-tab:hover,
+.listen-platform-tab:focus-visible {
+  border-color: rgba(91, 123, 245, 0.34);
+  color: #fff;
+  outline: none;
+}
+
+.listen-platform-tab.is-active {
+  border-color: rgba(91, 123, 245, 0.48);
+  background: rgba(91, 123, 245, 0.2);
+  color: #eef2ff;
+}
+
+.listen-platform-tab:active {
+  transform: scale(0.98);
+}
+
 .listen-panel {
   max-height: 0;
   margin-top: 0;
@@ -1660,6 +1705,10 @@ a {
   .listen-toggle-meta {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .listen-platform-tabs {
+    max-width: calc(100% - 38px);
   }
 
   .listen-picker.is-expanded .listen-panel {

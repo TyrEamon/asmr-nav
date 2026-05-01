@@ -108,6 +108,7 @@ let categorySelectTimer: ReturnType<typeof setTimeout> | null = null
 
 const sourcePlatformOptions: { value: ListenPlatform; label: string }[] = [
   { value: 'youtube', label: 'YouTube' },
+  { value: 'asmrone', label: 'ASMR.one' },
   { value: 'rsshub', label: 'RSSHub' },
   { value: 'rss', label: 'RSS' },
   { value: 'other', label: '其他' },

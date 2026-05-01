@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 import NavCard from '../components/NavCard.vue'
 import { useListenLibrary } from '../composables/useListenLibrary'
 import { useNavLibrary } from '../composables/useNavLibrary'
-import type { ListenItem } from '../types/listen'
+import type { ListenItem, ListenPlatform } from '../types/listen'
 import type { NavLink } from '../types/nav'
 import { formatClock, formatDateLabel } from '../utils/format'
 
@@ -21,6 +21,7 @@ const listenLoading = ref(false)
 const listenError = ref('')
 const listenFlipped = ref(false)
 const listenExpanded = ref(false)
+const selectedListenPlatform = ref<ListenPlatform | 'all'>('all')
 const CLICK_STORAGE_KEY = 'asmr-nav.click-counts.v1'
 const COMMON_CATEGORY = '常用推荐'
 const COLLECTION_CATEGORY = '收藏'
@@ -62,6 +63,12 @@ const searchEngines = [
     placeholder: '在 YouTube 搜索...',
     buildUrl: (query: string) => `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
   },
+]
+
+const listenPlatformFilters: { value: ListenPlatform | 'all'; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'youtube', label: 'YouTube' },
+  { value: 'asmrone', label: 'ASMR.one' },
 ]
 
 let timer: ReturnType<typeof setInterval> | null = null
@@ -196,6 +203,10 @@ function toggleListenPicker() {
   listenExpanded.value = !listenExpanded.value
 }
 
+function selectListenPlatform(platform: ListenPlatform | 'all') {
+  selectedListenPlatform.value = platform
+}
+
 function getClickCount(link: NavLink) {
   return clickCounts.value[link.id] ?? 0
 }
@@ -299,7 +310,11 @@ async function drawListenCard() {
       await wait(260)
     }
 
-    const item = await getRandomItem()
+    const item = await getRandomItem(
+      selectedListenPlatform.value === 'all'
+        ? {}
+        : { platform: selectedListenPlatform.value },
+    )
     listenItem.value = item
 
     if (!item) {
@@ -400,7 +415,22 @@ onBeforeUnmount(() => {
           <span class="listen-toggle-subtitle">{{ listenToggleSubtitle }}</span>
         </span>
         <span class="listen-toggle-meta">
-          <span class="listen-source-pill">RSSHub / YouTube</span>
+          <span class="listen-platform-tabs" aria-label="选择抽取来源" @click.stop>
+            <span
+              v-for="filter in listenPlatformFilters"
+              :key="filter.value"
+              class="listen-platform-tab"
+              role="button"
+              tabindex="0"
+              :class="{ 'is-active': selectedListenPlatform === filter.value }"
+              :aria-pressed="selectedListenPlatform === filter.value"
+              @click="selectListenPlatform(filter.value)"
+              @keydown.enter.prevent="selectListenPlatform(filter.value)"
+              @keydown.space.prevent="selectListenPlatform(filter.value)"
+            >
+              {{ filter.label }}
+            </span>
+          </span>
           <span class="listen-toggle-icon" aria-hidden="true">⌄</span>
         </span>
       </button>
