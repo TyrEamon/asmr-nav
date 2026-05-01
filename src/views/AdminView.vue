@@ -420,10 +420,12 @@ function isAsmrOneSource(source: ListenSource) {
     return true
   }
 
+  if (source.feedUrl.startsWith('/')) {
+    return false
+  }
+
   try {
-    const url = source.feedUrl.startsWith('/')
-      ? new URL(source.feedUrl, 'https://www.asmr.one')
-      : new URL(source.feedUrl)
+    const url = new URL(source.feedUrl)
     const host = url.hostname.toLowerCase()
 
     return host === 'asmr.one' || host === 'www.asmr.one' || host.startsWith('api.asmr-')
